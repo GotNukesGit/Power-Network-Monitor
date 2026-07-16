@@ -31,6 +31,14 @@ public class PowerMonitorCoverBehavior {
 
     private static final int TICKS_PER_SAMPLE = 20; // 1 Hz at 20 tps
     private static final int TICKS_PER_SECOND = 20;
+    private static final int CHART_MAX_POINTS = 120;
+
+    // Downsampled chart series, rebuilt once per sample (NOT on GUI poll --
+    // MUI2's sync handlers poll their supplier every container tick, so the
+    // supplier must be a cheap cached read, same pattern as GT's Tesla Tower
+    // chart). Swapped wholesale so GUI reads never see a half-built list.
+    private volatile java.util.List<Double> chartConsumption = java.util.Collections.emptyList();
+    private volatile java.util.List<Double> chartGeneration = java.util.Collections.emptyList();
 
     public PowerMonitorCoverBehavior(PowerMonitorTier startingTier) {
         setTier(startingTier);
@@ -112,6 +120,11 @@ public class PowerMonitorCoverBehavior {
 
         if (history != null) {
             history.record(liveConsumptionEUt, liveGenerationEUt, worldTime);
+            java.util.List<Double> cons = new java.util.ArrayList<>(CHART_MAX_POINTS);
+            java.util.List<Double> gen = new java.util.ArrayList<>(CHART_MAX_POINTS);
+            history.downsampleInto(cons, gen, CHART_MAX_POINTS);
+            chartConsumption = cons;
+            chartGeneration = gen;
         }
     }
 
@@ -221,6 +234,30 @@ public class PowerMonitorCoverBehavior {
             return -1;
         }
         return liveFuelReserveEU / liveMaxGenerationEUt / TICKS_PER_SECOND;
+    }
+
+    /** Downsampled consumption series (EU/t, oldest-first) for chart display. Empty if no history. */
+    public java.util.List<Double> getChartConsumption() {
+        return chartConsumption;
+    }
+
+    /** Downsampled generation series (EU/t, oldest-first) for chart display. Empty if no history. */
+    public java.util.List<Double> getChartGeneration() {
+        return chartGeneration;
+    }
+
+    /** Peak consumption over the history window (0 if no history). */
+    public long getPeakConsumptionEUt() {
+        return history != null ? history.getPeakConsumption() : 0L;
+    }
+
+    /** Peak deficit over the history window (0 if no history or never in deficit). */
+    public long getPeakDeficitEUt() {
+        if (history == null) {
+            return 0L;
+        }
+        long d = history.getPeakDeficit();
+        return d == Long.MIN_VALUE ? 0L : Math.max(0L, d);
     }
 
     /** Null if this tier has no history (ULV). */

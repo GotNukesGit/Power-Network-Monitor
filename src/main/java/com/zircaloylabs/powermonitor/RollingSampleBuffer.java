@@ -127,6 +127,39 @@ public class RollingSampleBuffer {
         runningMaxDeficit = Long.MIN_VALUE;
     }
 
+    /**
+     * Downsampled dual-series extraction for chart rendering: fills the two
+     * lists (cleared first) with up to maxPoints values each, oldest-first,
+     * covering the whole filled window. Each bucket keeps its MAX so short
+     * spikes stay visible instead of being averaged away. Generation is
+     * reconstructed as consumption - deficit (the two stored series).
+     */
+    public void downsampleInto(java.util.List<Double> consumptionOut, java.util.List<Double> generationOut,
+            int maxPoints) {
+        consumptionOut.clear();
+        generationOut.clear();
+        if (filledCount == 0 || maxPoints <= 0) {
+            return;
+        }
+        int n = consumptionSamples.length;
+        int start = (writeIndex - filledCount + n) % n;
+        int bucketSize = Math.max(1, (filledCount + maxPoints - 1) / maxPoints);
+        for (int b = 0; b < filledCount; b += bucketSize) {
+            long maxC = Long.MIN_VALUE;
+            long maxG = Long.MIN_VALUE;
+            int end = Math.min(b + bucketSize, filledCount);
+            for (int i = b; i < end; i++) {
+                int idx = (start + i) % n;
+                long c = consumptionSamples[idx];
+                long g = c - deficitSamples[idx]; // generation = consumption - deficit
+                if (c > maxC) maxC = c;
+                if (g > maxG) maxG = g;
+            }
+            consumptionOut.add((double) maxC);
+            generationOut.add((double) maxG);
+        }
+    }
+
     /** Returns samples oldest-first, for sparkline rendering. */
     public long[] getConsumptionHistoryOrdered() {
         long[] out = new long[filledCount];

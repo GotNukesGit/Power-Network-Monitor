@@ -156,6 +156,21 @@ public class PowerMonitorCover extends Cover {
         return h > 0 ? (h + "h " + m + "m") : (m + "m");
     }
 
+    // --- MUI2 dashboard GUI (opened by GT's standard gesture: shift-right-
+    // click the cover with an empty hand -- Cover#onCoverShiftRightClick
+    // opens the GUI whenever hasCoverGUI() is true, verified against GT
+    // 5.09.54.20 source). ---
+
+    @Override
+    public boolean hasCoverGUI() {
+        return true;
+    }
+
+    @Override
+    protected gregtech.common.gui.modularui.cover.base.CoverBaseGui<?> getCoverGui() {
+        return new PowerMonitorGui(this);
+    }
+
     /** Call from your upgrade-item right-click handler once that item exists. */
     public boolean upgradeTier(PowerMonitorTier newTier) {
         return behavior.tryUpgrade(newTier);
@@ -169,7 +184,8 @@ public class PowerMonitorCover extends Cover {
     public List<String> getAdditionalTooltip() {
         List<String> tip = super.getAdditionalTooltip();
         tip.add("§7Power Monitor [" + behavior.getTier().name() + "]");
-        tip.add("§7Right-click with screwdriver for live readout.");
+        tip.add("§7Shift-right-click (empty hand): dashboard GUI.");
+        tip.add("§7Screwdriver: chat readout.");
         return tip;
     }
 
