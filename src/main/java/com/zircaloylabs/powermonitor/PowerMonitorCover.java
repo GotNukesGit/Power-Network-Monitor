@@ -47,6 +47,23 @@ public class PowerMonitorCover extends Cover {
         this.behavior = new PowerMonitorCoverBehavior(startingTier);
     }
 
+    /**
+     * THE ACTUAL ROOT CAUSE of every "0/0, 0 cables visited" symptom tonight.
+     * Confirmed via decompile of gregtech.api.metatileentity.CoverableTileEntity
+     * #tickCoverAtSide(): `if (tCoverTickRate > 0 && aTickTimer % tCoverTickRate == 0)
+     * cover.doCoverThings(...)`. Cover's base getMinimumTickRate() defaults to 0,
+     * and getDefaultTickRate() just returns that. A tick rate of 0 means the
+     * `tCoverTickRate > 0` check fails FOREVER, so doCoverThings() is never called
+     * at all -- not throttled, not delayed, literally never invoked. Every BFS/
+     * voltage-matching fix made earlier tonight was correct code that never got
+     * a chance to run, because the cover was never ticking in the first place.
+     * Fix: override to a real tick rate (20 = once per second at 20 tps).
+     */
+    @Override
+    public int getMinimumTickRate() {
+        return 20;
+    }
+
     @Override
     public void doCoverThings(byte aRedstone, long aTickTimer) {
         if (behavior.isDestroyed()) {
