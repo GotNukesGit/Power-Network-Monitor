@@ -1,4 +1,3 @@
-
 name: Build and test
 
 on:
@@ -11,3 +10,9 @@ jobs:
   build-and-test:
     uses: GTNewHorizons/GTNH-Actions-Workflows/.github/workflows/build-and-test.yml@master
     secrets: inherit
+    with:
+      # Pulls declared dependencies (GT5-Unofficial) into the test server's
+      # mods folder, so the runServer smoke test doesn't fail on a missing-mod
+      # check that's actually correct behavior (this mod genuinely requires
+      # GregTech, which the bare test server doesn't have by default).
+      external-deps-inclusion: true
