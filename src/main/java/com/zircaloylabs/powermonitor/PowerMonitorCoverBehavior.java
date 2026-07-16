@@ -45,6 +45,40 @@ public class PowerMonitorCoverBehavior {
 
     private long liveDemandEUt = 0L;
     private long liveUnmetEUt = 0L;
+    // Deadband-smoothed display copies (see applyDeadband) -- raw values feed
+    // history/charts, smoothed values feed all live readouts so single-sample
+    // jitter doesn't make the numbers flicker.
+    private long shownDemandEUt = 0L;
+    private long shownUnmetEUt = 0L;
+    private long shownStorageFlowEUt = 0L;
+    // Saturation hysteresis: warning latches ON after SAT_ON_SAMPLES
+    // consecutive positive samples and OFF after SAT_OFF_SAMPLES clear ones,
+    // so a threshold-straddling network doesn't strobe the warning.
+    private int satOnStreak = 0;
+    private int satOffStreak = 0;
+    private boolean satLatched = false;
+    private static final int SAT_ON_SAMPLES = 2;
+    private static final int SAT_OFF_SAMPLES = 5;
+    // Outage black box: opens an event after OUTAGE_ON consecutive samples
+    // with unmet demand, closes after OUTAGE_OFF clear samples, and records
+    // the worst moment (peak unmet + the demand/delivered pair at that
+    // moment) so the player can see exactly why the network browned out.
+    private static final int OUTAGE_ON = 2;
+    private static final int OUTAGE_OFF = 5;
+    private static final int OUTAGE_LOG_SIZE = 3;
+    private int outageOnStreak = 0;
+    private int outageOffStreak = 0;
+    private Outage activeOutage = null;
+    private final java.util.ArrayDeque<Outage> outageLog = new java.util.ArrayDeque<>();
+    private long lastWorldTime = 0L;
+
+    private static final class Outage {
+        long startTime;
+        long endTime = -1L; // -1 while ongoing
+        long peakUnmet;
+        long demandAtPeak;
+        long deliveredAtPeak;
+    }
     private long liveStorageDischargeCapEUt = 0L;
     private int demandMeteredCount = 0;
     private int generatorCount = 0;
@@ -133,6 +167,7 @@ public class PowerMonitorCoverBehavior {
         liveFuelReserveEU = snap.totalFuelReserveEU;
         liveMaxGenerationEUt = snap.maxGenerationEUt;
         liveBufferNetChargeEUt = snap.bufferNetChargeEUt;
+        lastWorldTime = worldTime;
         liveDemandEUt = snap.totalDemandEUt;
         // Unmet = demand minus delivered. Conservative when the network has
         // machines outside demand-metering coverage (their demand isn't
@@ -153,9 +188,31 @@ public class PowerMonitorCoverBehavior {
         // storage is empty (or absent), any additional demand is invisible
         // to the meters -- machines just starve. Generators >= 95% of rated
         // + buffers <= 2% full is the strongest honest signal available.
-        supplySaturated = liveUnmetEUt > 0
+        boolean satRaw = liveUnmetEUt > 0
                 || (liveMaxGenerationEUt > 0 && liveGenerationEUt * 100 >= liveMaxGenerationEUt * 95
                         && (liveBufferCapacityEU <= 0 || liveBufferedEU * 50 <= liveBufferCapacityEU));
+        if (satRaw) {
+            satOnStreak++;
+            satOffStreak = 0;
+            if (satOnStreak >= SAT_ON_SAMPLES) {
+                satLatched = true;
+            }
+        } else {
+            satOffStreak++;
+            satOnStreak = 0;
+            if (satOffStreak >= SAT_OFF_SAMPLES) {
+                satLatched = false;
+            }
+        }
+        supplySaturated = satLatched;
+
+        // Display smoothing: 5% deadband (min 2 EU/t step) on the noisiest
+        // readouts; zero always snaps immediately so an idle network reads 0.
+        shownDemandEUt = applyDeadband(shownDemandEUt, liveDemandEUt);
+        shownUnmetEUt = applyDeadband(shownUnmetEUt, liveUnmetEUt);
+        shownStorageFlowEUt = applyDeadband(shownStorageFlowEUt, liveBufferNetChargeEUt);
+
+        trackOutage(worldTime);
 
         // Fuel is PER GENERATOR, not a shared pool: when the generator with
         // the least fuel runs dry, network capacity steps down to whatever
@@ -180,6 +237,62 @@ public class PowerMonitorCoverBehavior {
             chartBuffered = buf;
             chartFuel = fu;
         }
+    }
+
+    private static long applyDeadband(long displayed, long actual) {
+        if (actual == 0L) {
+            return 0L;
+        }
+        long delta = Math.abs(actual - displayed);
+        long threshold = Math.max(2L, Math.max(Math.abs(displayed), Math.abs(actual)) / 20L); // 5%
+        return delta >= threshold ? actual : displayed;
+    }
+
+    private void trackOutage(long worldTime) {
+        boolean shortfall = liveUnmetEUt > 0;
+        if (shortfall) {
+            outageOnStreak++;
+            outageOffStreak = 0;
+            if (activeOutage == null && outageOnStreak >= OUTAGE_ON) {
+                activeOutage = new Outage();
+                activeOutage.startTime = worldTime;
+                outageLog.addFirst(activeOutage);
+                while (outageLog.size() > OUTAGE_LOG_SIZE) {
+                    outageLog.removeLast();
+                }
+            }
+            if (activeOutage != null && liveUnmetEUt >= activeOutage.peakUnmet) {
+                activeOutage.peakUnmet = liveUnmetEUt;
+                activeOutage.demandAtPeak = liveDemandEUt;
+                activeOutage.deliveredAtPeak = liveConsumptionEUt;
+            }
+        } else {
+            outageOffStreak++;
+            outageOnStreak = 0;
+            if (activeOutage != null && outageOffStreak >= OUTAGE_OFF) {
+                activeOutage.endTime = worldTime;
+                activeOutage = null;
+            }
+        }
+    }
+
+    /** One display line per logged outage (most recent first, up to 2), or "" if the log is empty. */
+    public String getOutageSummary(int index) {
+        int i = 0;
+        for (Outage o : outageLog) {
+            if (i++ == index) {
+                String when = PowerMonitorCover.formatSeconds(Math.max(0L, (lastWorldTime - o.startTime) / 20L));
+                String dur = o.endTime < 0 ? "ongoing"
+                        : "lasted " + PowerMonitorCover.formatSeconds(Math.max(1L, (o.endTime - o.startTime) / 20L));
+                return when + " ago · " + dur + " · demand "
+                        + com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil
+                                .formatNumber(o.demandAtPeak)
+                        + " vs " + com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil
+                                .formatNumber(o.deliveredAtPeak)
+                        + " delivered";
+            }
+        }
+        return "";
     }
 
     /**
@@ -220,7 +333,7 @@ public class PowerMonitorCoverBehavior {
                     .append("→").append(PowerMonitorCover.formatSeconds((long) it[1]));
             totalRate -= (long) it[0];
             steps++;
-            if (steps >= 3 && totalRate > 0) {
+            if (steps >= 2 && totalRate > 0) {
                 sb.append(", …");
                 break;
             }
@@ -277,9 +390,9 @@ public class PowerMonitorCoverBehavior {
         return liveMaxGenerationEUt;
     }
 
-    /** Net storage flow: >0 buffers charging, <0 discharging (EU/t). */
+    /** Net storage flow (deadband-smoothed): >0 buffers charging, <0 discharging (EU/t). */
     public long getBufferNetChargeEUt() {
-        return liveBufferNetChargeEUt;
+        return shownStorageFlowEUt;
     }
 
     /** Rated throughput of the cable this cover sits on: voltage * amperage (EU/t). */
@@ -336,14 +449,14 @@ public class PowerMonitorCoverBehavior {
         return liveFuelReserveEU / liveMaxGenerationEUt / TICKS_PER_SECOND;
     }
 
-    /** True recipe demand (EU/t) across demand-metered machines -- what the network WANTS. */
+    /** True recipe demand (EU/t, deadband-smoothed for display) -- what the network WANTS. */
     public long getLiveDemandEUt() {
-        return liveDemandEUt;
+        return shownDemandEUt;
     }
 
-    /** Demand minus delivered: a positive value is real unmet load (machines browning out). */
+    /** Demand minus delivered (deadband-smoothed): a positive value is real unmet load. */
     public long getLiveUnmetEUt() {
-        return liveUnmetEUt;
+        return shownUnmetEUt;
     }
 
     /** Max EU/t storage could push when charged: sum of buffer voltage * battery count. */

@@ -71,7 +71,6 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue demand = reg(syncManager, "pm_demand", b::getLiveDemandEUt);
         LongSyncValue unmet = reg(syncManager, "pm_unmet", b::getLiveUnmetEUt);
         LongSyncValue maxGen = reg(syncManager, "pm_maxgen", b::getMaxGenerationEUt);
-        LongSyncValue supplyCap = reg(syncManager, "pm_supplycap", b::getSupplyCapacityEUt);
         LongSyncValue storageCap = reg(syncManager, "pm_storagecap", b::getStorageDischargeCapEUt);
         LongSyncValue storageFlow = reg(syncManager, "pm_storageflow", b::getBufferNetChargeEUt);
         LongSyncValue buf = reg(syncManager, "pm_buf", b::getLiveBufferedEU);
@@ -93,6 +92,8 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         StringSyncValue topName = regStr(syncManager, "pm_topname", b::getTopConsumerName);
         StringSyncValue schedFull = regStr(syncManager, "pm_schedfull", b::getFuelScheduleFullBurn);
         StringSyncValue schedCur = regStr(syncManager, "pm_schedcur", b::getFuelScheduleCurrent);
+        StringSyncValue outage0 = regStr(syncManager, "pm_outage0", () -> b.getOutageSummary(0));
+        StringSyncValue outage1 = regStr(syncManager, "pm_outage1", () -> b.getOutageSummary(1));
 
         // ================= POWER =================
         section(column, "POWER");
@@ -122,12 +123,15 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return s;
         });
 
+        // Deliberately NOT summed into one "ceiling": whether storage adds to
+        // or gates generation depends on topology (a buffer in SERIES with
+        // the load caps the whole network at ITS output, it doesn't add).
+        // Two honest components beat one number that's wrong half the time.
         row(column, () -> {
-            long cap = supplyCap.getLongValue();
+            String s = "Capacity: gen \u00a7f" + fmt(maxGen.getLongValue()) + "\u00a7r EU/t";
             long sc = storageCap.getLongValue();
-            String s = "Supply ceiling: \u00a7f" + fmt(cap) + "\u00a7r EU/t";
             if (sc > 0) {
-                s += "  (" + fmt(maxGen.getLongValue()) + " gen + " + fmt(sc) + " storage)";
+                s += " \u00b7 storage can push \u00a7f" + fmt(sc) + "\u00a7r EU/t";
             }
             return s;
         });
@@ -221,6 +225,16 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return "\u00a72\u2714 Supply healthy";
         });
 
+        // Outage black box: why did the lights go out, and how badly.
+        row(column, () -> {
+            String o = outage0.getStringValue();
+            return o.isEmpty() ? "" : "\u00a7cOutage: " + o;
+        });
+        row(column, () -> {
+            String o = outage1.getStringValue();
+            return o.isEmpty() ? "" : "\u00a7cOutage: " + o;
+        });
+
         divider(column);
 
         // ================= CHARTS (2x2) =================
@@ -256,7 +270,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
 
     private Flow chartColumn(String label, Supplier<List<Double>> series, String unit) {
         return Flow.column().coverChildren()
-                .child(IKey.str("\u00a77" + label).asWidget().marginBottom(1))
+                .child(IKey.str("\u00a7f" + label).asWidget().marginBottom(1))
                 .child(makeChart(series, unit));
     }
 
