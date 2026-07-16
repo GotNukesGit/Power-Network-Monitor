@@ -1,8 +1,13 @@
 package com.zircaloylabs.powermonitor;
 
+import net.minecraft.client.renderer.texture.IIconRegister;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.creativetab.CreativeTabs;
+import net.minecraft.util.IIcon;
+
+import cpw.mods.fml.relauncher.Side;
+import cpw.mods.fml.relauncher.SideOnly;
 
 import java.util.List;
 
@@ -16,14 +21,45 @@ import java.util.List;
  * itemStack(tier) is the single place that builds a correctly-tiered
  * ItemStack -- use it everywhere else (recipes, registerAllTiers(), etc.)
  * rather than constructing `new ItemStack(this, 1, ordinal)` by hand.
+ *
+ * BUG FIXED (found via in-game test): this class never overrode
+ * registerIcons()/getIconFromDamage(), so it had NO inventory icon at all
+ * -- exactly why NEI and the hotbar showed the default missing-texture
+ * purple/black checkerboard. Reuses the same per-tier overlay PNG as the
+ * cover's face texture (see gen_animated_textures.py) for visual
+ * consistency -- one asset per tier instead of a separate flat item icon.
  */
 public class ItemPowerMonitorCover extends Item {
+
+    @SideOnly(Side.CLIENT)
+    private IIcon[] icons;
 
     public ItemPowerMonitorCover() {
         setHasSubtypes(true);
         setMaxDamage(0);
         setUnlocalizedName("powermonitor.cover");
         setCreativeTab(CreativeTabs.tabRedstone); // placeholder tab -- swap for your own mod tab if you have one
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public void registerIcons(IIconRegister register) {
+        PowerMonitorTier[] all = PowerMonitorTier.values();
+        icons = new IIcon[all.length];
+        for (PowerMonitorTier tier : all) {
+            icons[tier.ordinal()] = register.registerIcon(
+                    "powermonitor:blocks/overlay_powermonitor_" + tier.name().toLowerCase());
+        }
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public IIcon getIconFromDamage(int meta) {
+        if (icons == null) {
+            return super.getIconFromDamage(meta);
+        }
+        int idx = Math.max(0, Math.min(meta, icons.length - 1));
+        return icons[idx];
     }
 
     public ItemStack itemStack(PowerMonitorTier tier) {
