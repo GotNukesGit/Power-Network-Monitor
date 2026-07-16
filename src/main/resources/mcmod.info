@@ -1,0 +1,21 @@
+{
+	"modListVersion": 2,
+	"modList": [{
+		"modid": "${modId}",
+		"name": "${modName}",
+		"description": "Tiered power-grid dashboard cover for GTNH. Right-click with a screwdriver on a placed cover for a live generation/consumption/buffer readout.",
+		"version": "${modVersion}",
+		"mcversion": "${minecraftVersion}",
+		"url": "https://github.com/GotNukesGit/Power-Network-Monitor",
+		"updateUrl": "",
+		"authorList": ["GotNukesGit"],
+		"credits": "",
+		"logoFile": "",
+		"screenshots": [],
+		"parent": "",
+		"requiredMods": ["gregtech"],
+		"dependencies": ["gregtech"],
+		"dependants": [],
+		"useDependencyInformation": false
+	}]
+}
