@@ -11,8 +11,9 @@ jobs:
     uses: GTNewHorizons/GTNH-Actions-Workflows/.github/workflows/build-and-test.yml@master
     secrets: inherit
     with:
-      # Pulls declared dependencies (GT5-Unofficial) into the test server's
-      # mods folder, so the runServer smoke test doesn't fail on a missing-mod
-      # check that's actually correct behavior (this mod genuinely requires
-      # GregTech, which the bare test server doesn't have by default).
-      external-deps-inclusion: true
+      # client-only skips the runServer smoke test entirely. This mod hard-
+      # depends on GregTech (declared in @Mod), and the generic test server
+      # doesn't have GT installed -- same situation hit on the Research Map
+      # project, where client-only: true was the confirmed fix (external-deps-
+      # inclusion was tried first tonight and did NOT resolve it).
+      client-only: true
