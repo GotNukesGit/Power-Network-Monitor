@@ -40,6 +40,7 @@ public class PowerMonitorCoverBehavior {
     private long liveBufferedEU = 0L;
     private long liveBufferCapacityEU = 0L;
     private boolean lastDiscoveryTruncated = false;
+    private int lastCablesVisited = 0; // diagnostic, shown in chat readout while chasing the discovery bug
 
     private static final int TICKS_PER_SAMPLE = 20; // 1 Hz at 20 tps
 
@@ -106,6 +107,7 @@ public class PowerMonitorCoverBehavior {
 
         NetworkDiscovery.Result discovery = NetworkDiscovery.discover(hostTile, tier.maxTrackedNodes);
         lastDiscoveryTruncated = discovery.truncated;
+        lastCablesVisited = discovery.cablesVisited;
 
         NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
         liveGenerationEUt = snap.totalGenerationEUt;
@@ -165,6 +167,11 @@ public class PowerMonitorCoverBehavior {
 
     public boolean isNetworkLargerThanTierSupports() {
         return lastDiscoveryTruncated;
+    }
+
+    /** Diagnostic: how many cable segments the BFS actually walked last poll. */
+    public int getLastCablesVisited() {
+        return lastCablesVisited;
     }
 
     /** Seconds until buffer empties at current net drain, or -1 if not draining. */

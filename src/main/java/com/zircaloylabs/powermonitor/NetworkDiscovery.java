@@ -46,6 +46,7 @@ public final class NetworkDiscovery {
     public static final class Result {
         public final List<IBasicEnergyContainer> members = new ArrayList<>();
         public boolean truncated = false; // hit maxTrackedNodes before finishing
+        public int cablesVisited = 0; // diagnostic: how much of the network the BFS actually walked
     }
 
     /**
@@ -78,15 +79,34 @@ public final class NetworkDiscovery {
             MTECable currentCable = (MTECable) currentMte;
 
             for (ForgeDirection side : ForgeDirection.VALID_DIRECTIONS) {
-                IMetaTileEntity neighborMte = currentCable.getConnectableMTE(side);
-                if (neighborMte == null) {
-                    continue; // not electrically connected on this side
+                TileEntity neighborTe = current.getTileEntityAtSide(side);
+                if (neighborTe == null) {
+                    continue;
                 }
 
-                TileEntity neighborTe = current.getTileEntityAtSide(side);
+                // BUG FOUND after transformer fix still didn't resolve testing:
+                // getConnectableMTE() requires the cable's rated voltage to
+                // EXACTLY equal the machine's rated voltage
+                // (metaTile.maxEUInput() == this.mVoltage -- confirmed via
+                // decompile, strict ==, no tolerance). That's correct for GT's
+                // own rendering/amperage-routing purposes, but it means any
+                // real base where cable tier doesn't exactly match machine
+                // tier (extremely common -- e.g. MV cable run to an LV
+                // machine for lower loss) would make getConnectableMTE return
+                // null for that side, and our BFS would never even see the
+                // machine as a network member. Fix: for machine/transformer
+                // detection specifically, stop depending on
+                // getConnectableMTE's voltage check -- do our own facing-only
+                // check instead. Cable-to-cable matching (material/insulation
+                // /colorization) is still legitimate and kept as-is below.
+                IMetaTileEntity neighborMteRaw = (neighborTe instanceof IGregTechTileEntity)
+                        ? ((IGregTechTileEntity) neighborTe).getMetaTileEntity()
+                        : null;
 
-                if (neighborMte instanceof MTECable) {
-                    if (!(neighborTe instanceof IGregTechTileEntity)) {
+                if (neighborMteRaw instanceof MTECable) {
+                    // Cable-to-cable: keep GT's real material/insulation/color
+                    // matching via getConnectableMTE -- this check is correct here.
+                    if (currentCable.getConnectableMTE(side) == null) {
                         continue;
                     }
                     IGregTechTileEntity neighborGt = (IGregTechTileEntity) neighborTe;
@@ -96,26 +116,13 @@ public final class NetworkDiscovery {
                     continue;
                 }
 
-                // BUG FOUND via in-game test tonight: transformers were being
-                // treated as dead-end terminals, same as generators/consumers.
-                // A transformer isn't an endpoint -- it converts voltage and
-                // relays power through to a DIFFERENT cable network on its
-                // other side. Confirmed via decompile: MTETransformer reports
-                // isEnetInput()==true AND isEnetOutput()==true (it's both, by
-                // design). Stopping the BFS there meant anything beyond a
-                // transformer (very common in a real base -- LV/MV boundary)
-                // was invisible to discovery, producing exactly the 0/0
-                // symptom seen in testing. Fix: if the terminal is a
-                // transformer, don't just record it -- also explore ITS
-                // getConnectableMTE on every side to continue into whatever
-                // cable network sits on the far side.
-                if ((neighborMte instanceof MTETransformer || neighborMte instanceof MTEWetTransformer)
-                        && neighborTe instanceof IGregTechTileEntity) {
+                if (neighborMteRaw instanceof MTETransformer || neighborMteRaw instanceof MTEWetTransformer) {
                     IGregTechTileEntity relayGt = (IGregTechTileEntity) neighborTe;
                     if (visitedRelays.add(relayGt)) {
                         exploreRelay(relayGt, visitedCables, visitedRelays, foundMembers, queue, maxTrackedNodes);
                         if (foundMembers.size() >= maxTrackedNodes) {
                             result.truncated = true;
+                            result.cablesVisited = visitedCables.size();
                             result.members.addAll(foundMembers);
                             return result;
                         }
@@ -123,20 +130,27 @@ public final class NetworkDiscovery {
                     continue;
                 }
 
-                // Terminal: a machine/generator/buffer, not another cable segment.
-                if (neighborTe instanceof IBasicEnergyContainer) {
-                    IBasicEnergyContainer container = (IBasicEnergyContainer) neighborTe;
-                    if (foundMembers.add(container)) {
-                        if (foundMembers.size() >= maxTrackedNodes) {
-                            result.truncated = true;
-                            result.members.addAll(foundMembers);
-                            return result;
+                // Terminal machine: facing check only, no voltage-match requirement.
+                if (neighborMteRaw instanceof MetaTileEntity && neighborTe instanceof IBasicEnergyContainer) {
+                    MetaTileEntity mte = (MetaTileEntity) neighborMteRaw;
+                    boolean facesUs = (mte.isEnetInput() && mte.isInputFacing(side.getOpposite()))
+                            || (mte.isEnetOutput() && mte.isOutputFacing(side.getOpposite()));
+                    if (facesUs) {
+                        IBasicEnergyContainer container = (IBasicEnergyContainer) neighborTe;
+                        if (foundMembers.add(container)) {
+                            if (foundMembers.size() >= maxTrackedNodes) {
+                                result.truncated = true;
+                                result.cablesVisited = visitedCables.size();
+                                result.members.addAll(foundMembers);
+                                return result;
+                            }
                         }
                     }
                 }
             }
         }
 
+        result.cablesVisited = visitedCables.size();
         result.members.addAll(foundMembers);
         return result;
     }

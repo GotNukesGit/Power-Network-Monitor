@@ -76,6 +76,7 @@ public class PowerMonitorCover extends Cover {
         long net = behavior.getLiveNetEUt();
 
         aPlayer.addChatMessage(new ChatComponentText("§6-- Power Monitor [" + tier.name() + "] --"));
+        aPlayer.addChatMessage(new ChatComponentText("§7[debug] cables visited: " + behavior.getLastCablesVisited()));
         aPlayer.addChatMessage(new ChatComponentText("Generation: " + gen + " EU/t   Consumption: " + cons + " EU/t"));
         aPlayer.addChatMessage(new ChatComponentText((net >= 0 ? "§aSurplus: +" : "§cDeficit: ") + net + " EU/t"));
 
