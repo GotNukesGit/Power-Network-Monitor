@@ -1,55 +1,110 @@
 #!/usr/bin/env python3
 """
-Generates placeholder 16x16 overlay textures for the Power Monitor cover,
-one per tier. These are deliberately simple/functional placeholders (a dial
-gauge motif, color-ramped by tier) -- not final art. GT covers render as a
-casing texture (MACHINE_CASINGS[tier][0], supplied by GT itself) layered
-with an overlay texture (this file) via TextureFactory.of(casing, overlay),
-same pattern confirmed in MetaGeneratedItem02's registerCovers() this
-session. So we only need to generate the overlay, not a full block texture.
+Generates ALL Power Monitor cover art, one set per tier:
+
+  textures/blocks/overlay_powermonitor_<tier>.png
+      Full-face animated CRT readout: 8 frames stacked vertically
+      (16x128 sprite sheet). A sibling .png.mcmeta animation descriptor
+      is written alongside -- Forge's stitcher detects the stacked sheet
+      and animates it automatically; without the .mcmeta a non-square
+      texture fails to stitch ("broken aspect ratio").
+
+  textures/items/overlay_powermonitor_<tier>.png
+      Static inventory icon == frame 0 of the block animation, so the
+      NEI/hotbar icon exactly matches the placed cover face.
+
+Registered names are prefix-free ("powermonitor:overlay_powermonitor_x"):
+each atlas resolves against its own base directory (textures/blocks/ or
+textures/items/). See the ATLAS PATH RULE javadoc in PowerMonitorIcons --
+do NOT put "blocks/" or "items/" inside the registered name.
+
+Art: 1px dark bezel, dark-green phosphor screen with faint gridlines, a
+scrolling sine waveform in the tier's accent color with a dimmed
+connecting trace, and a white beam draw-point sweeping with the phase.
+Deterministic output -- re-running never produces spurious diffs.
+Requires Pillow (pip install Pillow).
 """
 
-from PIL import Image, ImageDraw
+from PIL import Image
+import math
 import os
 
-OUT_DIR = "/home/claude/powermonitor/src/main/resources/assets/powermonitor/textures/blocks"
-os.makedirs(OUT_DIR, exist_ok=True)
+BASE = os.path.dirname(os.path.abspath(__file__))
+BLOCKS_DIR = os.path.join(BASE, "src", "main", "resources", "assets",
+                          "powermonitor", "textures", "blocks")
+ITEMS_DIR = os.path.join(BASE, "src", "main", "resources", "assets",
+                         "powermonitor", "textures", "items")
+os.makedirs(BLOCKS_DIR, exist_ok=True)
+os.makedirs(ITEMS_DIR, exist_ok=True)
 
-# Tier -> accent color. Ascending brightness/saturation as a simple visual
-# "more advanced" cue -- NOT verified against GT's own official tier color
-# table (GTValues has tier colors used in tooltips; didn't cross-check this
-# session). Swap these for GT's real tier colors if you want visual
-# consistency with GT's own UI -- flagged as a follow-up, not blocking.
-TIERS = [
-    ("ULV", (120, 120, 120)),
-    ("LV",  (200, 200, 80)),
-    ("MV",  (80, 160, 220)),
-    ("HV",  (220, 200, 60)),
-    ("EV",  (200, 90, 90)),
-    ("IV",  (120, 200, 160)),
-    ("LuV", (170, 120, 220)),
-    ("ZPM", (80, 220, 200)),
-    ("UV",  (230, 230, 230)),
-]
+# Tier -> waveform accent color.
+TIERS = {
+    "ulv": (150, 150, 150),
+    "lv":  (200, 200, 60),
+    "mv":  (80, 160, 220),
+    "hv":  (220, 200, 60),
+    "ev":  (220, 120, 40),
+    "iv":  (220, 60, 60),
+    "luv": (180, 60, 200),
+    "zpm": (100, 220, 200),
+    "uv":  (240, 240, 240),
+}
 
-def draw_gauge(color):
+FRAME_C = (15, 15, 15, 255)    # CRT bezel
+SCREEN = (5, 12, 8, 255)       # phosphor background
+GRID = (10, 22, 14, 255)       # faint gridlines
+WHITE = (255, 255, 255, 255)   # beam draw-point
+
+NFRAMES = 8
+PERIOD = 14.0
+AMP = 3.0
+MID = 7
+FRAMETIME = 3  # ticks per frame
+
+MCMETA = '{\n  "animation": {\n    "frametime": %d\n  }\n}\n' % FRAMETIME
+
+
+def draw_frame(tc, phase):
     img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    # dark casing backing
-    d.rectangle([1, 1, 14, 14], fill=(30, 30, 30, 255), outline=(10, 10, 10, 255))
-    # gauge dial circle
-    d.ellipse([3, 3, 12, 12], fill=(20, 20, 20, 255), outline=color)
-    # needle
-    d.line([7, 7, 10, 4], fill=color, width=1)
-    # center pin
-    d.point((7, 7), fill=(255, 255, 255, 255))
-    # small tick marks
-    for tx, ty in [(3, 3), (12, 3), (3, 12), (12, 12)]:
-        d.point((tx, ty), fill=color)
+    px = img.load()
+    for y in range(16):
+        for x in range(16):
+            px[x, y] = FRAME_C if (x in (0, 15) or y in (0, 15)) else SCREEN
+    for gy in (4, 8, 11):
+        for x in range(1, 15):
+            px[x, gy] = GRID
+    t = tc + (255,)
+    dim = tuple(c // 2 for c in tc) + (255,)
+    prev_y = None
+    for x in range(1, 15):
+        y = MID + AMP * math.sin(2 * math.pi * ((x + phase * 2) / PERIOD))
+        y = max(2, min(13, int(round(y))))
+        px[x, y] = t
+        if prev_y is not None and abs(y - prev_y) > 1:
+            step = 1 if y > prev_y else -1
+            for yy in range(prev_y + step, y, step):
+                px[x, yy] = dim
+        prev_y = y
+    bx = 1 + (phase * 2) % 14
+    by = MID + AMP * math.sin(2 * math.pi * ((bx + phase * 2) / PERIOD))
+    px[int(bx), max(2, min(13, int(round(by))))] = WHITE
     return img
 
-for name, color in TIERS:
-    img = draw_gauge(color)
-    path = os.path.join(OUT_DIR, f"overlay_powermonitor_{name.lower()}.png")
-    img.save(path, "PNG")
-    print(f"  {path}")
+
+def main():
+    for tier, tc in TIERS.items():
+        sheet = Image.new("RGBA", (16, 16 * NFRAMES), (0, 0, 0, 0))
+        for f in range(NFRAMES):
+            sheet.paste(draw_frame(tc, f), (0, 16 * f))
+        block_png = os.path.join(BLOCKS_DIR, f"overlay_powermonitor_{tier}.png")
+        sheet.save(block_png)
+        with open(block_png + ".mcmeta", "w", newline="\n") as m:
+            m.write(MCMETA)
+        draw_frame(tc, 0).save(
+            os.path.join(ITEMS_DIR, f"overlay_powermonitor_{tier}.png"))
+        print("wrote", tier)
+    print(f"done: {len(TIERS)} tiers (animated block sheet + mcmeta + item icon each)")
+
+
+if __name__ == "__main__":
+    main()
