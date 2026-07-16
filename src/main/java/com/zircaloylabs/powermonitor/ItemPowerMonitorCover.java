@@ -66,12 +66,29 @@ public class ItemPowerMonitorCover extends Item {
         }
         int idx = Math.max(0, Math.min(meta, icons.length - 1));
         IIcon result = icons[idx];
+        // Log the icon's REAL state here (post-stitch, at actual render time) --
+        // the earlier registerIcons()-time log always shows zeros for every
+        // icon in the game (registerIcon() returns a placeholder immediately;
+        // real pixel data loads later during the atlas stitch), so that
+        // reading wasn't meaningful. This one fires every time the item is
+        // drawn, well after stitching is done, and is the real signal.
+        // Only log the first few times to avoid spamming the log every frame.
+        if (renderLogCount < 3) {
+            renderLogCount++;
+            PowerMonitorMod.LOG.info("[powermonitor] getIconFromDamage(" + meta + ") POST-STITCH state -> "
+                    + (result == null ? "NULL" : result.toString())
+                    + (result == null ? "" : (" iconWidth=" + result.getIconWidth()
+                        + " iconHeight=" + result.getIconHeight())));
+        }
         if (result == null) {
             PowerMonitorMod.LOG.warn("[powermonitor] getIconFromDamage(" + meta
                     + ") -> icons[" + idx + "] is NULL despite icons array being non-null");
         }
         return result;
     }
+
+    @SideOnly(Side.CLIENT)
+    private static int renderLogCount = 0;
 
     public ItemStack itemStack(PowerMonitorTier tier) {
         return new ItemStack(this, 1, tier.ordinal());
