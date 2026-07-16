@@ -5,6 +5,8 @@ import gregtech.api.interfaces.tileentity.IBasicEnergyContainer;
 import gregtech.api.interfaces.tileentity.IGregTechTileEntity;
 import gregtech.api.metatileentity.MetaTileEntity;
 import gregtech.api.metatileentity.implementations.MTECable;
+import gregtech.api.metatileentity.implementations.MTETransformer;
+import gregtech.api.metatileentity.implementations.MTEWetTransformer;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraftforge.common.util.ForgeDirection;
 
@@ -60,6 +62,7 @@ public final class NetworkDiscovery {
         }
 
         Set<IGregTechTileEntity> visitedCables = new HashSet<>();
+        Set<IGregTechTileEntity> visitedRelays = new HashSet<>(); // transformers already walked through
         Set<IBasicEnergyContainer> foundMembers = new HashSet<>();
         ArrayDeque<IGregTechTileEntity> queue = new ArrayDeque<>();
 
@@ -93,9 +96,34 @@ public final class NetworkDiscovery {
                     continue;
                 }
 
+                // BUG FOUND via in-game test tonight: transformers were being
+                // treated as dead-end terminals, same as generators/consumers.
+                // A transformer isn't an endpoint -- it converts voltage and
+                // relays power through to a DIFFERENT cable network on its
+                // other side. Confirmed via decompile: MTETransformer reports
+                // isEnetInput()==true AND isEnetOutput()==true (it's both, by
+                // design). Stopping the BFS there meant anything beyond a
+                // transformer (very common in a real base -- LV/MV boundary)
+                // was invisible to discovery, producing exactly the 0/0
+                // symptom seen in testing. Fix: if the terminal is a
+                // transformer, don't just record it -- also explore ITS
+                // getConnectableMTE on every side to continue into whatever
+                // cable network sits on the far side.
+                if ((neighborMte instanceof MTETransformer || neighborMte instanceof MTEWetTransformer)
+                        && neighborTe instanceof IGregTechTileEntity) {
+                    IGregTechTileEntity relayGt = (IGregTechTileEntity) neighborTe;
+                    if (visitedRelays.add(relayGt)) {
+                        exploreRelay(relayGt, visitedCables, visitedRelays, foundMembers, queue, maxTrackedNodes);
+                        if (foundMembers.size() >= maxTrackedNodes) {
+                            result.truncated = true;
+                            result.members.addAll(foundMembers);
+                            return result;
+                        }
+                    }
+                    continue;
+                }
+
                 // Terminal: a machine/generator/buffer, not another cable segment.
-                // The underlying TileEntity implements IBasicEnergyContainer if it's
-                // a real GT energy-handling block (BaseMetaTileEntity does).
                 if (neighborTe instanceof IBasicEnergyContainer) {
                     IBasicEnergyContainer container = (IBasicEnergyContainer) neighborTe;
                     if (foundMembers.add(container)) {
@@ -111,6 +139,43 @@ public final class NetworkDiscovery {
 
         result.members.addAll(foundMembers);
         return result;
+    }
+
+    /**
+     * A transformer/wet-transformer isn't a network member itself (it doesn't
+     * generate or consume in the sense our snapshot cares about -- it passes
+     * power through). Walk its own connectable sides to find the cable
+     * network on its far side and merge that into the same BFS.
+     */
+    private static void exploreRelay(
+            IGregTechTileEntity relayTile,
+            Set<IGregTechTileEntity> visitedCables,
+            Set<IGregTechTileEntity> visitedRelays,
+            Set<IBasicEnergyContainer> foundMembers,
+            ArrayDeque<IGregTechTileEntity> queue,
+            int maxTrackedNodes) {
+        IMetaTileEntity relayMte = relayTile.getMetaTileEntity();
+        if (!(relayMte instanceof MetaTileEntity)) {
+            return;
+        }
+        for (ForgeDirection side : ForgeDirection.VALID_DIRECTIONS) {
+            TileEntity beyondTe = relayTile.getTileEntityAtSide(side);
+            if (!(beyondTe instanceof IGregTechTileEntity)) {
+                continue;
+            }
+            IGregTechTileEntity beyondGt = (IGregTechTileEntity) beyondTe;
+            IMetaTileEntity beyondMte = beyondGt.getMetaTileEntity();
+            if (beyondMte instanceof MTECable && visitedCables.add(beyondGt)) {
+                queue.add(beyondGt);
+            } else if (!(beyondMte instanceof MTECable) && beyondTe instanceof IBasicEnergyContainer) {
+                // Directly touching a machine on the relay's other face (no
+                // cable in between) -- record it same as a normal terminal.
+                foundMembers.add((IBasicEnergyContainer) beyondTe);
+            }
+            if (foundMembers.size() >= maxTrackedNodes) {
+                return;
+            }
+        }
     }
 
     /**
