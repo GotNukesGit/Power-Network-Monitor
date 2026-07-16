@@ -44,11 +44,15 @@ public class ItemPowerMonitorCover extends Item {
     @Override
     @SideOnly(Side.CLIENT)
     public void registerIcons(IIconRegister register) {
+        PowerMonitorMod.LOG.info("[powermonitor] registerIcons() CALLED on ItemPowerMonitorCover");
         PowerMonitorTier[] all = PowerMonitorTier.values();
         icons = new IIcon[all.length];
         for (PowerMonitorTier tier : all) {
-            icons[tier.ordinal()] = register.registerIcon(
-                    "powermonitor:blocks/overlay_powermonitor_" + tier.name().toLowerCase());
+            String path = "powermonitor:blocks/overlay_powermonitor_" + tier.name().toLowerCase();
+            IIcon icon = register.registerIcon(path);
+            icons[tier.ordinal()] = icon;
+            PowerMonitorMod.LOG.info("[powermonitor]   registered icon for " + tier.name()
+                    + " at path '" + path + "' -> " + icon);
         }
     }
 
@@ -56,10 +60,17 @@ public class ItemPowerMonitorCover extends Item {
     @SideOnly(Side.CLIENT)
     public IIcon getIconFromDamage(int meta) {
         if (icons == null) {
+            PowerMonitorMod.LOG.warn("[powermonitor] getIconFromDamage(" + meta
+                    + ") called but icons array is NULL -- registerIcons() never ran or ran after this call");
             return super.getIconFromDamage(meta);
         }
         int idx = Math.max(0, Math.min(meta, icons.length - 1));
-        return icons[idx];
+        IIcon result = icons[idx];
+        if (result == null) {
+            PowerMonitorMod.LOG.warn("[powermonitor] getIconFromDamage(" + meta
+                    + ") -> icons[" + idx + "] is NULL despite icons array being non-null");
+        }
+        return result;
     }
 
     public ItemStack itemStack(PowerMonitorTier tier) {
