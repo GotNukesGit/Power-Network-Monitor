@@ -88,6 +88,10 @@ public class PowerMonitorCover extends Cover {
         aPlayer.addChatMessage(new ChatComponentText("§6-- Power Monitor [" + tier.name() + "] --"));
         aPlayer.addChatMessage(new ChatComponentText("§7[debug] cables visited: " + behavior.getLastCablesVisited()));
         aPlayer.addChatMessage(new ChatComponentText("Generation: " + gen + " EU/t   Consumption: " + cons + " EU/t"));
+        long demand = behavior.getLiveDemandEUt();
+        long unmet = behavior.getLiveUnmetEUt();
+        aPlayer.addChatMessage(new ChatComponentText(
+                "Demand: " + demand + " EU/t" + (unmet > 0 ? "   §cUnmet: " + unmet + " EU/t" : "")));
         aPlayer.addChatMessage(new ChatComponentText((net >= 0 ? "§aSurplus: +" : "§cDeficit: ") + net + " EU/t"));
 
         long cableLimit = behavior.getAnchorThroughputEUt();
@@ -139,9 +143,14 @@ public class PowerMonitorCover extends Cover {
                     "Peak draw (%s window): %d EU/t",
                     formatSeconds(tier.historySeconds), history.getPeakConsumption())));
             aPlayer.addChatMessage(new ChatComponentText(String.format(
-                    "Peak deficit: %d EU/t", history.getPeakDeficit())));
+                    "Peak storage drain: %d EU/t", Math.max(0L, history.getPeakDeficit()))));
         } else {
             aPlayer.addChatMessage(new ChatComponentText("§7(Upgrade past ULV for history tracking)"));
+        }
+
+        if (behavior.isSupplySaturated()) {
+            aPlayer.addChatMessage(new ChatComponentText(
+                    "§cSupply saturated -- generators at rated output with empty storage; machines may be browning out."));
         }
 
         if (behavior.isNetworkLargerThanTierSupports()) {

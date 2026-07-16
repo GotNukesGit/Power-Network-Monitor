@@ -13,13 +13,17 @@ package com.zircaloylabs.powermonitor;
 public class RollingSampleBuffer {
 
     private final long[] consumptionSamples;
+    private final long[] demandSamples; // true recipe demand (see record() note)
     private final long[] deficitSamples;
+    private final long[] bufferedSamples; // total stored EU across network buffers at sample time
+    private final long[] fuelSamples; // total fuel-reserve EU at sample time
     private final long[] sampleTimestamps; // world time (ticks) at capture, for "peak at HH:MM" display
     private int writeIndex = 0;
     private int filledCount = 0;
 
     private long runningMaxConsumption = 0L;
     private long runningMaxConsumptionTimestamp = 0L;
+    private long runningMaxDemand = 0L;
     private long runningMaxDeficit = Long.MIN_VALUE;
     private long runningMaxDeficitTimestamp = 0L;
 
@@ -28,7 +32,10 @@ public class RollingSampleBuffer {
             throw new IllegalArgumentException("RollingSampleBuffer requires capacitySeconds > 0; tier has no history, don't allocate one.");
         }
         this.consumptionSamples = new long[capacitySeconds];
+        this.demandSamples = new long[capacitySeconds];
         this.deficitSamples = new long[capacitySeconds];
+        this.bufferedSamples = new long[capacitySeconds];
+        this.fuelSamples = new long[capacitySeconds];
         this.sampleTimestamps = new long[capacitySeconds];
     }
 
@@ -41,11 +48,23 @@ public class RollingSampleBuffer {
      * @param generation  total EU/t produced by generators on the network right now
      * @param worldTime   current world total time, for timestamping the peak
      */
-    public void record(long consumption, long generation, long worldTime) {
-        long deficit = consumption - generation; // positive = net draw exceeding supply
+    public void record(long consumption, long generation, long demand, long buffered, long fuelReserve,
+            long worldTime) {
+        // NOTE on semantics: this is DELIVERED-power accounting. GT's per-
+        // machine averages measure EU actually transferred, not EU demanded,
+        // so consumption can never exceed what generation + discharging
+        // storage supplied. A positive value here therefore means "storage
+        // is draining", NOT "demand exceeds supply" -- during a brownout
+        // with empty buffers this reads ~0 while machines starve. Display
+        // layers label it "storage drain" accordingly; brownout detection
+        // is a separate saturation heuristic in the behavior class.
+        long deficit = consumption - generation; // positive = storage draining to cover draw
 
         consumptionSamples[writeIndex] = consumption;
+        demandSamples[writeIndex] = demand;
         deficitSamples[writeIndex] = deficit;
+        bufferedSamples[writeIndex] = buffered;
+        fuelSamples[writeIndex] = fuelReserve;
         sampleTimestamps[writeIndex] = worldTime;
 
         writeIndex = (writeIndex + 1) % consumptionSamples.length;
@@ -60,6 +79,9 @@ public class RollingSampleBuffer {
         if (consumption > runningMaxConsumption) {
             runningMaxConsumption = consumption;
             runningMaxConsumptionTimestamp = worldTime;
+        }
+        if (demand > runningMaxDemand) {
+            runningMaxDemand = demand;
         }
         if (deficit > runningMaxDeficit) {
             runningMaxDeficit = deficit;
@@ -105,6 +127,11 @@ public class RollingSampleBuffer {
         return runningMaxConsumption;
     }
 
+    /** Peak true demand over the window (recipe EU/t, independent of delivery). */
+    public long getPeakDemand() {
+        return runningMaxDemand;
+    }
+
     public long getPeakConsumptionTimestamp() {
         return runningMaxConsumptionTimestamp;
     }
@@ -119,11 +146,15 @@ public class RollingSampleBuffer {
 
     public void reset() {
         java.util.Arrays.fill(consumptionSamples, 0L);
+        java.util.Arrays.fill(demandSamples, 0L);
         java.util.Arrays.fill(deficitSamples, 0L);
+        java.util.Arrays.fill(bufferedSamples, 0L);
+        java.util.Arrays.fill(fuelSamples, 0L);
         java.util.Arrays.fill(sampleTimestamps, 0L);
         writeIndex = 0;
         filledCount = 0;
         runningMaxConsumption = 0L;
+        runningMaxDemand = 0L;
         runningMaxDeficit = Long.MIN_VALUE;
     }
 
@@ -135,9 +166,13 @@ public class RollingSampleBuffer {
      * reconstructed as consumption - deficit (the two stored series).
      */
     public void downsampleInto(java.util.List<Double> consumptionOut, java.util.List<Double> generationOut,
+            java.util.List<Double> demandOut, java.util.List<Double> bufferedOut, java.util.List<Double> fuelOut,
             int maxPoints) {
         consumptionOut.clear();
         generationOut.clear();
+        demandOut.clear();
+        bufferedOut.clear();
+        fuelOut.clear();
         if (filledCount == 0 || maxPoints <= 0) {
             return;
         }
@@ -147,6 +182,9 @@ public class RollingSampleBuffer {
         for (int b = 0; b < filledCount; b += bucketSize) {
             long maxC = Long.MIN_VALUE;
             long maxG = Long.MIN_VALUE;
+            long maxD = Long.MIN_VALUE;
+            long maxB = Long.MIN_VALUE;
+            long maxF = Long.MIN_VALUE;
             int end = Math.min(b + bucketSize, filledCount);
             for (int i = b; i < end; i++) {
                 int idx = (start + i) % n;
@@ -154,9 +192,15 @@ public class RollingSampleBuffer {
                 long g = c - deficitSamples[idx]; // generation = consumption - deficit
                 if (c > maxC) maxC = c;
                 if (g > maxG) maxG = g;
+                if (demandSamples[idx] > maxD) maxD = demandSamples[idx];
+                if (bufferedSamples[idx] > maxB) maxB = bufferedSamples[idx];
+                if (fuelSamples[idx] > maxF) maxF = fuelSamples[idx];
             }
             consumptionOut.add((double) maxC);
             generationOut.add((double) maxG);
+            demandOut.add((double) maxD);
+            bufferedOut.add((double) maxB);
+            fuelOut.add((double) maxF);
         }
     }
 

@@ -94,6 +94,8 @@ public class PowerMonitorWailaProvider implements IWailaDataProvider {
             t.setLong("fuelSecCur", b.getFuelSecondsAtCurrentRate());
             t.setLong("fuelSecMax", b.getFuelSecondsAtMaxRate());
             t.setBoolean("trunc", b.isNetworkLargerThanTierSupports());
+            t.setBoolean("sat", b.isSupplySaturated());
+            t.setLong("unmet", b.getLiveUnmetEUt());
             tag.setTag(NBT_KEY, t);
             break; // network numbers are identical from any monitor on this cable
         }
@@ -172,6 +174,12 @@ public class PowerMonitorWailaProvider implements IWailaDataProvider {
             }
         }
 
+        long unmet = t.getLong("unmet");
+        if (unmet > 0) {
+            currenttip.add("§c⚠ Unmet demand: " + unmet + " EU/t");
+        } else if (t.getBoolean("sat")) {
+            currenttip.add("§cSupply saturated -- possible brownout");
+        }
         if (t.getBoolean("trunc")) {
             currenttip.add("\u00a7eNetwork larger than this tier tracks -- upgrade.");
         }

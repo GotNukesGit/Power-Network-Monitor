@@ -39,6 +39,22 @@ public class PowerMonitorCoverBehavior {
     // chart). Swapped wholesale so GUI reads never see a half-built list.
     private volatile java.util.List<Double> chartConsumption = java.util.Collections.emptyList();
     private volatile java.util.List<Double> chartGeneration = java.util.Collections.emptyList();
+    private volatile java.util.List<Double> chartDemand = java.util.Collections.emptyList();
+    private volatile java.util.List<Double> chartBuffered = java.util.Collections.emptyList();
+    private volatile java.util.List<Double> chartFuel = java.util.Collections.emptyList();
+
+    private long liveDemandEUt = 0L;
+    private long liveUnmetEUt = 0L;
+    private long liveStorageDischargeCapEUt = 0L;
+    private int demandMeteredCount = 0;
+    private int generatorCount = 0;
+    private int machineCount = 0;
+    private int bufferCount = 0;
+    private long topConsumerEUt = 0L;
+    private String topConsumerName = "";
+    private boolean supplySaturated = false;
+    private String fuelScheduleFullBurn = "";
+    private String fuelScheduleCurrent = "";
 
     public PowerMonitorCoverBehavior(PowerMonitorTier startingTier) {
         setTier(startingTier);
@@ -117,15 +133,99 @@ public class PowerMonitorCoverBehavior {
         liveFuelReserveEU = snap.totalFuelReserveEU;
         liveMaxGenerationEUt = snap.maxGenerationEUt;
         liveBufferNetChargeEUt = snap.bufferNetChargeEUt;
+        liveDemandEUt = snap.totalDemandEUt;
+        // Unmet = demand minus delivered. Conservative when the network has
+        // machines outside demand-metering coverage (their demand isn't
+        // counted but their delivered draw is) -- so a positive number here
+        // is a REAL shortfall, never a metering artifact.
+        liveUnmetEUt = Math.max(0L, snap.totalDemandEUt - snap.totalConsumptionEUt);
+        liveStorageDischargeCapEUt = snap.storageDischargeCapacityEUt;
+        demandMeteredCount = snap.demandMeteredCount;
+        generatorCount = snap.generatorCount;
+        machineCount = snap.machineCount;
+        bufferCount = snap.bufferCount;
+        topConsumerEUt = snap.topConsumerEUt;
+        topConsumerName = snap.topConsumerName;
+
+        // Brownout heuristic (see RollingSampleBuffer#record for why the
+        // "deficit" series can't detect this): generation is DELIVERED
+        // power, so when every generator is pinned at rated output and
+        // storage is empty (or absent), any additional demand is invisible
+        // to the meters -- machines just starve. Generators >= 95% of rated
+        // + buffers <= 2% full is the strongest honest signal available.
+        supplySaturated = liveUnmetEUt > 0
+                || (liveMaxGenerationEUt > 0 && liveGenerationEUt * 100 >= liveMaxGenerationEUt * 95
+                        && (liveBufferCapacityEU <= 0 || liveBufferedEU * 50 <= liveBufferCapacityEU));
+
+        // Fuel is PER GENERATOR, not a shared pool: when the generator with
+        // the least fuel runs dry, network capacity steps down to whatever
+        // the remaining generators can supply. These schedules project that
+        // staircase, once at rated output and once at each generator's
+        // current output.
+        fuelScheduleFullBurn = buildFuelSchedule(snap.generatorFuelProfile, true);
+        fuelScheduleCurrent = buildFuelSchedule(snap.generatorFuelProfile, false);
 
         if (history != null) {
-            history.record(liveConsumptionEUt, liveGenerationEUt, worldTime);
+            history.record(liveConsumptionEUt, liveGenerationEUt, liveDemandEUt, liveBufferedEU,
+                    liveFuelReserveEU, worldTime);
             java.util.List<Double> cons = new java.util.ArrayList<>(CHART_MAX_POINTS);
             java.util.List<Double> gen = new java.util.ArrayList<>(CHART_MAX_POINTS);
-            history.downsampleInto(cons, gen, CHART_MAX_POINTS);
+            java.util.List<Double> dem = new java.util.ArrayList<>(CHART_MAX_POINTS);
+            java.util.List<Double> buf = new java.util.ArrayList<>(CHART_MAX_POINTS);
+            java.util.List<Double> fu = new java.util.ArrayList<>(CHART_MAX_POINTS);
+            history.downsampleInto(cons, gen, dem, buf, fu, CHART_MAX_POINTS);
             chartConsumption = cons;
             chartGeneration = gen;
+            chartDemand = dem;
+            chartBuffered = buf;
+            chartFuel = fu;
         }
+    }
+
+    /**
+     * Builds the stepped capacity schedule, e.g. "128->1h05m, 96->2h10m, 32->3h":
+     * the network can supply 128 EU/t until 1h05m (first generator dry), then
+     * 96 until 2h10m, and so on. Entries are (rate the network sustains) ->
+     * (time at which that rate ends). Capped at 3 steps for display.
+     *
+     * @param fullBurn true = every generator at rated output; false = at its
+     *                 current measured output (generators idle or throttled
+     *                 burn slower, so runtimes stretch accordingly).
+     */
+    private static String buildFuelSchedule(java.util.List<long[]> profile, boolean fullBurn) {
+        java.util.List<double[]> items = new java.util.ArrayList<>(); // {rateEUt, secondsUntilDry}
+        for (long[] p : profile) {
+            long rate = fullBurn ? p[1] : p[0];
+            long fuel = p[2];
+            if (rate <= 0 || fuel <= 0) {
+                continue; // idle or fuel-less generator contributes nothing to the fueled schedule
+            }
+            items.add(new double[] { rate, fuel / (rate * 20.0) });
+        }
+        if (items.isEmpty()) {
+            return "";
+        }
+        items.sort(java.util.Comparator.comparingDouble(a -> a[1]));
+        long totalRate = 0L;
+        for (double[] it : items) {
+            totalRate += (long) it[0];
+        }
+        StringBuilder sb = new StringBuilder();
+        int steps = 0;
+        for (double[] it : items) {
+            if (steps > 0) {
+                sb.append(", ");
+            }
+            sb.append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(totalRate))
+                    .append("→").append(PowerMonitorCover.formatSeconds((long) it[1]));
+            totalRate -= (long) it[0];
+            steps++;
+            if (steps >= 3 && totalRate > 0) {
+                sb.append(", …");
+                break;
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -234,6 +334,86 @@ public class PowerMonitorCoverBehavior {
             return -1;
         }
         return liveFuelReserveEU / liveMaxGenerationEUt / TICKS_PER_SECOND;
+    }
+
+    /** True recipe demand (EU/t) across demand-metered machines -- what the network WANTS. */
+    public long getLiveDemandEUt() {
+        return liveDemandEUt;
+    }
+
+    /** Demand minus delivered: a positive value is real unmet load (machines browning out). */
+    public long getLiveUnmetEUt() {
+        return liveUnmetEUt;
+    }
+
+    /** Max EU/t storage could push when charged: sum of buffer voltage * battery count. */
+    public long getStorageDischargeCapEUt() {
+        return liveStorageDischargeCapEUt;
+    }
+
+    /** Total supply ceiling: rated generation + storage discharge capacity. */
+    public long getSupplyCapacityEUt() {
+        return liveMaxGenerationEUt + liveStorageDischargeCapEUt;
+    }
+
+    /** How many machines the demand meter covers (singleblocks with active recipes). */
+    public int getDemandMeteredCount() {
+        return demandMeteredCount;
+    }
+
+    /** Peak true demand over the history window (0 if no history). */
+    public long getPeakDemandEUt() {
+        return history != null ? history.getPeakDemand() : 0L;
+    }
+
+    /** Downsampled demand series (EU/t, oldest-first) for chart display. Empty if no history. */
+    public java.util.List<Double> getChartDemand() {
+        return chartDemand;
+    }
+
+    public int getGeneratorCount() {
+        return generatorCount;
+    }
+
+    public int getMachineCount() {
+        return machineCount;
+    }
+
+    public int getBufferCount() {
+        return bufferCount;
+    }
+
+    public long getTopConsumerEUt() {
+        return topConsumerEUt;
+    }
+
+    public String getTopConsumerName() {
+        return topConsumerName;
+    }
+
+    /** True when generators are pinned near rated output with empty/no storage -- likely brownout. */
+    public boolean isSupplySaturated() {
+        return supplySaturated;
+    }
+
+    /** Stepped capacity schedule at rated output ("128->1h05m, 96->2h10m"), or "" if nothing fueled. */
+    public String getFuelScheduleFullBurn() {
+        return fuelScheduleFullBurn;
+    }
+
+    /** Stepped capacity schedule at current output, or "" if nothing fueled/running. */
+    public String getFuelScheduleCurrent() {
+        return fuelScheduleCurrent;
+    }
+
+    /** Downsampled buffered-EU series (oldest-first) for chart display. Empty if no history. */
+    public java.util.List<Double> getChartBuffered() {
+        return chartBuffered;
+    }
+
+    /** Downsampled fuel-reserve-EU series (oldest-first) for chart display. Empty if no history. */
+    public java.util.List<Double> getChartFuel() {
+        return chartFuel;
     }
 
     /** Downsampled consumption series (EU/t, oldest-first) for chart display. Empty if no history. */

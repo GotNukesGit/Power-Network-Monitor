@@ -6,6 +6,7 @@ import gregtech.api.interfaces.tileentity.IGregTechTileEntity;
 import gregtech.api.metatileentity.MetaTileEntity;
 import gregtech.api.metatileentity.implementations.MTEBasicBatteryBuffer;
 import gregtech.api.metatileentity.implementations.MTEBasicGenerator;
+import gregtech.api.metatileentity.implementations.MTEBasicMachine;
 import gregtech.api.metatileentity.implementations.MTECable;
 import gregtech.api.metatileentity.implementations.MTETransformer;
 import net.minecraft.item.ItemStack;
@@ -252,6 +253,44 @@ public final class NetworkDiscovery {
 
         /** Net storage flow: sum over buffers of (avgIn - avgOut). >0 charging, <0 discharging. */
         public long bufferNetChargeEUt = 0L;
+
+        /**
+         * True recipe demand: sum of mEUt over singleblock machines with an
+         * active recipe (mMaxProgresstime > 0). Verified against
+         * MTEBasicMachine's tick loop (5.09.54.20): a machine that FAILS to
+         * drain energy keeps mEUt/mMaxProgresstime set (they only clear on
+         * recipe completion), so a starving machine's demand stays readable
+         * -- this is the number "delivered" metering fundamentally cannot
+         * see. Coverage: singleblock machines only (multiblocks use a
+         * different field layout; counted in machineCount but not here --
+         * see demandMeteredCount for how complete the metering is).
+         */
+        public long totalDemandEUt = 0L;
+        public int demandMeteredCount = 0;
+
+        /**
+         * Max EU/t storage could push if fully charged: sum over battery
+         * buffers of maxEUOutput() * maxAmperesOut() (= tier voltage *
+         * battery count, verified against MTEBasicBatteryBuffer source).
+         */
+        public long storageDischargeCapacityEUt = 0L;
+
+        // Network census.
+        public int generatorCount = 0; // single-block generators (MTEBasicGenerator)
+        public int machineCount = 0; // non-buffer, non-generator members
+        public int bufferCount = 0;
+
+        /** Highest average draw among non-buffer members, for "top consumer" display. */
+        public long topConsumerEUt = 0L;
+        public String topConsumerName = "";
+
+        /**
+         * Per-generator fuel profile: one {avgOutputEUt, ratedEUt, fuelReserveEU}
+         * entry per single-block generator, for staged runtime projection
+         * (fuel is per-machine, NOT a shared pool -- when one generator runs
+         * dry, network capacity steps down to the remaining generators).
+         */
+        public final List<long[]> generatorFuelProfile = new ArrayList<>();
     }
 
     public static Snapshot summarize(List<IBasicEnergyContainer> members) {
@@ -262,6 +301,7 @@ public final class NetworkDiscovery {
             // a "consumer" while charging and "generator" while discharging within
             // the same snapshot).
             if (isBatteryBuffer(container)) {
+                snap.bufferCount++;
                 accumulateBuffer(snap, container);
                 continue;
             }
@@ -273,9 +313,16 @@ public final class NetworkDiscovery {
             }
             if (avgIn > 0) {
                 snap.totalConsumptionEUt += avgIn;
+                if (avgIn > snap.topConsumerEUt) {
+                    snap.topConsumerEUt = avgIn;
+                    snap.topConsumerName = localNameOf(container);
+                }
             }
 
-            accumulateGeneratorTelemetry(snap, container);
+            if (!accumulateGeneratorTelemetry(snap, container)) {
+                snap.machineCount++;
+                accumulateDemand(snap, container);
+            }
         }
         return snap;
     }
@@ -286,6 +333,8 @@ public final class NetworkDiscovery {
                 : null;
 
         if (mte instanceof MTEBasicBatteryBuffer) {
+            MTEBasicBatteryBuffer bb = (MTEBasicBatteryBuffer) mte;
+            snap.storageDischargeCapacityEUt += bb.maxEUOutput() * bb.maxAmperesOut();
             // getStoredEnergy() (public, verified against GT 5.09.54.20 source)
             // returns {stored, capacity} INCLUDING the charge held in the
             // battery items in its slots. The tile-level getStoredEU()/
@@ -326,34 +375,77 @@ public final class NetworkDiscovery {
      * AE/chests/hoppers that hasn't reached a generator yet, and solar-type
      * generators (no fuel concept).
      */
-    private static void accumulateGeneratorTelemetry(Snapshot snap, IBasicEnergyContainer container) {
+    /** @return true if this member is a single-block generator (and was accounted as one). */
+    private static boolean accumulateGeneratorTelemetry(Snapshot snap, IBasicEnergyContainer container) {
         if (!(container instanceof IGregTechTileEntity)) {
-            return;
+            return false;
         }
         IMetaTileEntity mte = ((IGregTechTileEntity) container).getMetaTileEntity();
         if (!(mte instanceof MTEBasicGenerator)) {
-            return;
+            return false;
         }
         MTEBasicGenerator gen = (MTEBasicGenerator) mte;
 
-        snap.maxGenerationEUt += gen.maxEUOutput();
+        snap.generatorCount++;
+        long rated = gen.maxEUOutput();
+        snap.maxGenerationEUt += rated;
 
+        long fuelEU = 0L;
         FluidStack tankFluid = gen.mFluid;
         if (tankFluid != null && tankFluid.amount > 0) {
             long euPerOp = gen.getFuelValue(tankFluid, true);
             if (euPerOp > 0) {
                 long perOpMb = Math.max(1, gen.consumedFluidPerOperation(tankFluid));
-                snap.totalFuelReserveEU += (tankFluid.amount / perOpMb) * euPerOp;
+                fuelEU += (tankFluid.amount / perOpMb) * euPerOp;
             }
         }
-
         ItemStack inputStack = gen.mInventory[gen.getInputSlot()];
         if (inputStack != null && inputStack.stackSize > 0) {
             long euPerItem = gen.getFuelValue(inputStack, true);
             if (euPerItem > 0) {
-                snap.totalFuelReserveEU += euPerItem * inputStack.stackSize;
+                fuelEU += euPerItem * inputStack.stackSize;
             }
         }
+        snap.totalFuelReserveEU += fuelEU;
+        snap.generatorFuelProfile.add(new long[] { container.getAverageElectricOutput(), rated, fuelEU });
+        return true;
+    }
+
+    /**
+     * True-demand metering for singleblock machines. mEUt is the actual
+     * post-overclock per-tick draw (set via calculator.getConsumption() when
+     * a recipe starts) and stays set while the machine stutters from energy
+     * starvation. The Integer.MAX_VALUE - 1 sentinel is GT's "forever
+     * recipe" marker and would wreck totals, so it's excluded.
+     */
+    private static void accumulateDemand(Snapshot snap, IBasicEnergyContainer container) {
+        if (!(container instanceof IGregTechTileEntity)) {
+            return;
+        }
+        IMetaTileEntity mte = ((IGregTechTileEntity) container).getMetaTileEntity();
+        if (!(mte instanceof MTEBasicMachine)) {
+            return;
+        }
+        MTEBasicMachine machine = (MTEBasicMachine) mte;
+        if (machine.mMaxProgresstime > 0 && machine.mEUt > 0 && machine.mEUt < Integer.MAX_VALUE - 1) {
+            snap.totalDemandEUt += machine.mEUt;
+            snap.demandMeteredCount++;
+        }
+    }
+
+    private static String localNameOf(IBasicEnergyContainer container) {
+        if (container instanceof IGregTechTileEntity) {
+            IMetaTileEntity mte = ((IGregTechTileEntity) container).getMetaTileEntity();
+            if (mte != null) {
+                // getLocalName() is a default method on IMetaTileEntity
+                // (verified against GT 5.09.54.20 source).
+                String name = mte.getLocalName();
+                if (name != null) {
+                    return name;
+                }
+            }
+        }
+        return "?";
     }
 
     /**

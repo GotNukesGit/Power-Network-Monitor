@@ -1,49 +1,62 @@
 package com.zircaloylabs.powermonitor;
 
 import com.cleanroommc.modularui.api.drawable.IKey;
+import com.cleanroommc.modularui.drawable.Rectangle;
 import com.cleanroommc.modularui.value.sync.GenericListSyncHandler;
 import com.cleanroommc.modularui.value.sync.LongSyncValue;
 import com.cleanroommc.modularui.value.sync.PanelSyncManager;
+import com.cleanroommc.modularui.value.sync.StringSyncValue;
 import com.cleanroommc.modularui.widgets.layout.Flow;
 
 import gregtech.api.modularui2.CoverGuiData;
-import com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil;
+import gregtech.api.modularui2.GTWidgetThemes;
 import gregtech.common.gui.modularui.cover.base.CoverBaseGui;
 import gregtech.common.gui.modularui.widget.LineChartWidget;
+
+import com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil;
 
 import net.minecraft.network.PacketBuffer;
 
 import java.text.DecimalFormat;
+import java.util.List;
+import java.util.function.Supplier;
 
 /**
- * MUI2 dashboard for the Power Monitor cover: full live telemetry plus
- * scrolling history charts. Opened by GT's standard cover-GUI gesture
- * (shift-right-click with an empty hand).
+ * MUI2 dashboard for the Power Monitor cover. Opened by GT's standard
+ * cover-GUI gesture (shift-right-click with an empty hand).
  *
- * Architecture notes (all patterns verified against GT 5.09.54.20 source,
- * not guessed):
+ * Layout: sectioned like a real SCADA panel -- POWER (the three-line truth:
+ * demand / delivered / unmet, then supply capacity), STORAGE (level + live
+ * flow), FUEL (per-generator staged schedules), NETWORK (census, top draw,
+ * cable, peaks), then a 2x2 grid of history charts. Warnings render in a
+ * fixed slot at the bottom of NETWORK so the panel doesn't reflow when a
+ * warning appears.
  *
- *   - Extends CoverBaseGui and implements addUIWidgets(), the extension
- *     point Cover#buildUI routes through (same shape as CoverEUMeterGui).
- *     The base panel auto-sizes to content (coverChildren), supplies the
- *     title row and the tick-rate button.
+ * Data-accounting notes (why the numbers mean what they say):
  *
- *   - The live numbers exist only server-side (doCoverThings runs on the
- *     server), so every displayed value is a getter-only LongSyncValue
- *     registered with the PanelSyncManager: MUI2 polls the supplier
- *     server-side, syncs on change, and IKey.dynamic() reads the synced
- *     client cache each frame.
+ *   - Demand is TRUE recipe draw (mEUt of singleblock machines with an
+ *     active recipe -- readable even while the machine starves; verified
+ *     against MTEBasicMachine's tick loop). Delivered is GT's measured
+ *     average transfer. Unmet = demand - delivered, and is conservative:
+ *     machines outside metering coverage add delivered draw but no demand,
+ *     so a positive Unmet is always a real shortfall.
  *
- *   - Charts are GT's own LineChartWidget fed by GenericListSyncHandler
- *     <Double> -- the exact widget + sync pattern GT's Tesla Tower GUI
- *     uses for its output-current history chart. The series suppliers
- *     return lists cached in the behavior (rebuilt once per 1 Hz sample),
- *     so MUI2's per-tick supplier polling stays cheap.
+ *   - Storage flow is metered on the buffers themselves (avg in - out),
+ *     which is more trustworthy than consumption-minus-generation: those
+ *     two are metered on opposite sides of cable loss and never quite
+ *     reconcile.
+ *
+ * All sync/widget/theme patterns verified against GT 5.09.54.20 source
+ * (CoverEUMeterGui for the extension point, Tesla Tower GUI for the chart
+ * + GenericListSyncHandler pattern and the TESLA_TOWER_CHART theme).
  */
 public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
 
-    private static final int CHART_WIDTH = 160;
-    private static final int CHART_HEIGHT = 44;
+    private static final int CHART_WIDTH = 96;
+    private static final int CHART_HEIGHT = 40;
+    private static final int CHART_GAP = 6;
+    private static final int CONTENT_WIDTH = CHART_WIDTH * 2 + CHART_GAP;
+    private static final int DIVIDER_COLOR = 0x30FFFFFF; // subtle light rule on the dark cover theme
 
     public PowerMonitorGui(PowerMonitorCover cover) {
         super(cover);
@@ -55,44 +68,83 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
 
         LongSyncValue gen = reg(syncManager, "pm_gen", b::getLiveGenerationEUt);
         LongSyncValue cons = reg(syncManager, "pm_cons", b::getLiveConsumptionEUt);
+        LongSyncValue demand = reg(syncManager, "pm_demand", b::getLiveDemandEUt);
+        LongSyncValue unmet = reg(syncManager, "pm_unmet", b::getLiveUnmetEUt);
         LongSyncValue maxGen = reg(syncManager, "pm_maxgen", b::getMaxGenerationEUt);
+        LongSyncValue supplyCap = reg(syncManager, "pm_supplycap", b::getSupplyCapacityEUt);
+        LongSyncValue storageCap = reg(syncManager, "pm_storagecap", b::getStorageDischargeCapEUt);
+        LongSyncValue storageFlow = reg(syncManager, "pm_storageflow", b::getBufferNetChargeEUt);
         LongSyncValue buf = reg(syncManager, "pm_buf", b::getLiveBufferedEU);
         LongSyncValue bufCap = reg(syncManager, "pm_bufcap", b::getLiveBufferCapacityEU);
         LongSyncValue secEmpty = reg(syncManager, "pm_secempty", b::getSecondsToEmpty);
         LongSyncValue secFull = reg(syncManager, "pm_secfull", b::getSecondsToFull);
         LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getFuelReserveEU);
-        LongSyncValue fuelSecCur = reg(syncManager, "pm_fuelseccur", b::getFuelSecondsAtCurrentRate);
-        LongSyncValue fuelSecMax = reg(syncManager, "pm_fuelsecmax", b::getFuelSecondsAtMaxRate);
         LongSyncValue cable = reg(syncManager, "pm_cable", b::getAnchorThroughputEUt);
-        LongSyncValue peakCons = reg(syncManager, "pm_peakcons", b::getPeakConsumptionEUt);
-        LongSyncValue peakDef = reg(syncManager, "pm_peakdef", b::getPeakDeficitEUt);
+        LongSyncValue peakDemand = reg(syncManager, "pm_peakdemand", b::getPeakDemandEUt);
+        LongSyncValue peakDrain = reg(syncManager, "pm_peakdrain", b::getPeakDeficitEUt);
+        LongSyncValue genCount = reg(syncManager, "pm_gencount", b::getGeneratorCount);
+        LongSyncValue machCount = reg(syncManager, "pm_machcount", b::getMachineCount);
+        LongSyncValue bufCount = reg(syncManager, "pm_bufcount", b::getBufferCount);
+        LongSyncValue cables = reg(syncManager, "pm_cables", b::getLastCablesVisited);
+        LongSyncValue topEUt = reg(syncManager, "pm_topeut", b::getTopConsumerEUt);
+        LongSyncValue saturated = reg(syncManager, "pm_sat", () -> b.isSupplySaturated() ? 1L : 0L);
+        LongSyncValue truncated = reg(syncManager, "pm_trunc", () -> b.isNetworkLargerThanTierSupports() ? 1L : 0L);
 
-        // --- Live telemetry rows ---
+        StringSyncValue topName = regStr(syncManager, "pm_topname", b::getTopConsumerName);
+        StringSyncValue schedFull = regStr(syncManager, "pm_schedfull", b::getFuelScheduleFullBurn);
+        StringSyncValue schedCur = regStr(syncManager, "pm_schedcur", b::getFuelScheduleCurrent);
 
-        column.child(IKey.dynamic(() -> {
-            long g = gen.getLongValue();
-            long m = maxGen.getLongValue();
-            String s = "Generation: \u00a7a" + fmt(g) + " EU/t\u00a7r";
-            if (m > 0) {
-                s += "  (rated " + fmt(m) + ", " + (100L * g / m) + "% in use)";
+        // ================= POWER =================
+        section(column, "POWER");
+
+        row(column, () -> {
+            long d = demand.getLongValue();
+            long delivered = cons.getLongValue();
+            long u = unmet.getLongValue();
+            String s = "Demand: \u00a7f" + fmt(d) + "\u00a7r   Delivered: \u00a7f" + fmt(delivered) + "\u00a7r EU/t";
+            if (u > 0) {
+                s += "   \u00a7c\u26a0 Unmet: " + fmt(u);
             }
             return s;
-        }).asWidget().marginBottom(2));
+        });
 
-        column.child(IKey.dynamic(() -> {
-            long c = cons.getLongValue();
-            long net = gen.getLongValue() - c;
-            return "Consumption: \u00a7c" + fmt(c) + " EU/t\u00a7r   Net: "
-                    + (net >= 0 ? "\u00a7a+" : "\u00a7c") + fmt(net) + " EU/t";
-        }).asWidget().marginBottom(2));
+        row(column, () -> {
+            long g = gen.getLongValue();
+            long m = maxGen.getLongValue();
+            long net = g - cons.getLongValue();
+            String s = "Generation: \u00a7a" + fmt(g) + "\u00a7r";
+            if (m > 0) {
+                s += " / " + fmt(m) + " EU/t (" + (100L * g / m) + "%)";
+            } else {
+                s += " EU/t";
+            }
+            s += "   Net: " + (net >= 0 ? "\u00a7a+" : "\u00a7c") + fmt(net);
+            return s;
+        });
 
-        column.child(IKey.dynamic(() -> {
+        row(column, () -> {
+            long cap = supplyCap.getLongValue();
+            long sc = storageCap.getLongValue();
+            String s = "Supply ceiling: \u00a7f" + fmt(cap) + "\u00a7r EU/t";
+            if (sc > 0) {
+                s += "  (" + fmt(maxGen.getLongValue()) + " gen + " + fmt(sc) + " storage)";
+            }
+            return s;
+        });
+
+        divider(column);
+
+        // ================= STORAGE =================
+        section(column, "STORAGE");
+
+        row(column, () -> {
             long cap = bufCap.getLongValue();
             if (cap <= 0) {
-                return "Buffer: \u00a78none on network";
+                return "\u00a78No storage on network";
             }
             long stored = buf.getLongValue();
-            String s = "Buffer: " + fmt(stored) + " / " + fmt(cap) + " EU (" + (100L * stored / cap) + "%)";
+            String s = "Charge: \u00a7f" + fmt(stored) + "\u00a7r / " + fmt(cap) + " EU (" + (100L * stored / cap)
+                    + "%)";
             long e = secEmpty.getLongValue();
             long f = secFull.getLongValue();
             if (e >= 0) {
@@ -101,52 +153,119 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 s += "  \u00a7a~" + PowerMonitorCover.formatSeconds(f) + " to full";
             }
             return s;
-        }).asWidget().marginBottom(2));
+        });
 
-        column.child(IKey.dynamic(() -> {
-            long fu = fuel.getLongValue();
-            if (fu <= 0) {
-                return maxGen.getLongValue() > 0 ? "Fuel: \u00a7enone in generator tanks/slots"
-                        : "Fuel: \u00a78no generators on network";
+        row(column, () -> {
+            if (bufCap.getLongValue() <= 0) {
+                return "";
             }
-            String s = "Fuel: " + fmt(fu) + " EU";
-            long atCur = fuelSecCur.getLongValue();
-            long atMax = fuelSecMax.getLongValue();
-            if (atCur >= 0) {
-                s += "  ~" + PowerMonitorCover.formatSeconds(atCur) + " @ current";
+            long flow = storageFlow.getLongValue();
+            String s;
+            if (flow > 0) {
+                s = "Flow: \u00a7a+" + fmt(flow) + " EU/t charging\u00a7r";
+            } else if (flow < 0) {
+                s = "Flow: \u00a7c" + fmt(flow) + " EU/t discharging\u00a7r";
+            } else {
+                s = "Flow: \u00a77idle";
             }
-            if (atMax >= 0 && atMax != atCur) {
-                s += "  ~" + PowerMonitorCover.formatSeconds(atMax) + " @ full burn";
+            return s + "   Can supply up to " + fmt(storageCap.getLongValue()) + " EU/t";
+        });
+
+        divider(column);
+
+        // ================= FUEL =================
+        section(column, "FUEL");
+
+        row(column, () -> {
+            if (fuel.getLongValue() <= 0) {
+                return maxGen.getLongValue() > 0 ? "\u00a7eNo fuel in generator tanks/slots"
+                        : "\u00a78No generators on network";
             }
-            return s;
-        }).asWidget().marginBottom(2));
+            String sched = schedFull.getStringValue();
+            return "Full burn:  " + (sched.isEmpty() ? "\u00a78n/a" : "\u00a7f" + sched);
+        });
 
-        column.child(IKey.dynamic(
-                () -> "This cable: " + fmt(cable.getLongValue()) + " EU/t max throughput")
-                .asWidget().marginBottom(2));
+        row(column, () -> {
+            if (fuel.getLongValue() <= 0) {
+                return "";
+            }
+            String sched = schedCur.getStringValue();
+            return sched.isEmpty() ? "Current:    \u00a78generators idle" : "Current:    \u00a7f" + sched;
+        });
 
-        column.child(IKey.dynamic(
-                () -> "Peak draw: \u00a7c" + fmt(peakCons.getLongValue()) + " EU/t\u00a7r   Peak deficit: \u00a7c"
-                        + fmt(peakDef.getLongValue()) + " EU/t")
-                .asWidget().marginBottom(4));
+        divider(column);
 
-        // --- History charts (only for tiers that track history) ---
+        // ================= NETWORK =================
+        section(column, "NETWORK");
+
+        row(column, () -> genCount.getLongValue() + " gen \u00b7 " + machCount.getLongValue() + " machines \u00b7 "
+                + bufCount.getLongValue() + " buffers \u00b7 " + cables.getLongValue() + " cables");
+
+        row(column, () -> {
+            long t = topEUt.getLongValue();
+            return t <= 0 ? "Top draw: \u00a78none"
+                    : "Top draw: \u00a7f" + topName.getStringValue() + "\u00a7r (" + fmt(t) + " EU/t)";
+        });
+
+        row(column, () -> "This cable: \u00a7f" + fmt(cable.getLongValue()) + "\u00a7r EU/t max   Peak demand: \u00a7f"
+                + fmt(peakDemand.getLongValue()) + "\u00a7r   Peak drain: \u00a7f" + fmt(peakDrain.getLongValue()));
+
+        // Warning slot -- always present so the panel doesn't reflow.
+        row(column, () -> {
+            if (unmet.getLongValue() > 0 || saturated.getLongValue() != 0) {
+                return "\u00a7c\u26a0 Supply saturated -- machines browning out";
+            }
+            if (truncated.getLongValue() != 0) {
+                return "\u00a7e\u26a0 Network larger than this tier tracks -- upgrade";
+            }
+            return "\u00a72\u2714 Supply healthy";
+        });
+
+        divider(column);
+
+        // ================= CHARTS (2x2) =================
 
         if (b.getHistory() == null) {
             column.child(IKey.str("\u00a78(Upgrade past ULV for history charts)").asWidget());
             return;
         }
 
-        column.child(IKey.str("\u00a77Consumption history (EU/t)").asWidget().marginBottom(1));
-        column.child(makeChart(b::getChartConsumption).marginBottom(4));
-        column.child(IKey.str("\u00a77Generation history (EU/t)").asWidget().marginBottom(1));
-        column.child(makeChart(b::getChartGeneration));
+        column.child(Flow.row().coverChildren()
+                .child(chartColumn("Demand (EU/t)", b::getChartDemand, " EU/t").marginRight(CHART_GAP))
+                .child(chartColumn("Generation (EU/t)", b::getChartGeneration, " EU/t"))
+                .marginBottom(4));
+        column.child(Flow.row().coverChildren()
+                .child(chartColumn("Storage (EU)", b::getChartBuffered, " EU").marginRight(CHART_GAP))
+                .child(chartColumn("Fuel reserve (EU)", b::getChartFuel, " EU")));
     }
 
-    private LineChartWidget makeChart(java.util.function.Supplier<java.util.List<Double>> series) {
-        // Sync-handler construction copied from GT's Tesla Tower chart --
-        // the null slots are the client->server setter (read-only chart)
-        // and the deserializer hook we don't need.
+    // --- layout helpers ---
+
+    private void section(Flow column, String title) {
+        column.child(IKey.str("\u00a76\u00a7l" + title).asWidget().marginBottom(2));
+    }
+
+    private void row(Flow column, Supplier<String> text) {
+        column.child(IKey.dynamic(text::get).asWidget().marginBottom(2));
+    }
+
+    private void divider(Flow column) {
+        column.child(new Rectangle().color(DIVIDER_COLOR).asWidget().size(CONTENT_WIDTH, 1)
+                .marginTop(1).marginBottom(3));
+    }
+
+    private Flow chartColumn(String label, Supplier<List<Double>> series, String unit) {
+        return Flow.column().coverChildren()
+                .child(IKey.str("\u00a77" + label).asWidget().marginBottom(1))
+                .child(makeChart(series, unit));
+    }
+
+    private LineChartWidget makeChart(Supplier<List<Double>> series, String unit) {
+        // Sync-handler construction copied from GT's Tesla Tower chart; the
+        // null slots are the client->server setter (read-only chart) and the
+        // deserializer hook we don't need. TESLA_TOWER_CHART is GT's
+        // purpose-built electricity-chart theme: bright green line,
+        // near-white min/max labels on a dark plot background.
         return new LineChartWidget()
                 .syncHandler(new GenericListSyncHandler<>(
                         series,
@@ -155,15 +274,22 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                         PacketBuffer::writeDouble,
                         Double::equals,
                         null))
+                .widgetTheme(GTWidgetThemes.TESLA_TOWER_CHART)
                 .lowerBoundAlwaysZero()
                 .lineWidth(2)
-                .chartUnit(" EU/t")
+                .chartUnit(unit)
                 .formatter(new DecimalFormat("#,##0"))
                 .size(CHART_WIDTH, CHART_HEIGHT);
     }
 
     private LongSyncValue reg(PanelSyncManager syncManager, String name, java.util.function.LongSupplier getter) {
         LongSyncValue value = new LongSyncValue(getter);
+        syncManager.syncValue(name, 0, value);
+        return value;
+    }
+
+    private StringSyncValue regStr(PanelSyncManager syncManager, String name, Supplier<String> getter) {
+        StringSyncValue value = new StringSyncValue(getter);
         syncManager.syncValue(name, 0, value);
         return value;
     }
