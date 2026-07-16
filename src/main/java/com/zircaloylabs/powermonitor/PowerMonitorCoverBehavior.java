@@ -1,5 +1,6 @@
 package com.zircaloylabs.powermonitor;
 
+import gregtech.api.interfaces.metatileentity.IMetaTileEntity;
 import gregtech.api.interfaces.tileentity.IBasicEnergyContainer;
 import gregtech.api.interfaces.tileentity.IGregTechTileEntity;
 import gregtech.common.covers.Cover;
@@ -96,9 +97,21 @@ public class PowerMonitorCoverBehavior {
         }
         lastSampleWorldTime = worldTime;
 
-        long observedVoltage = hostTile.getInputVoltage() > hostTile.getOutputVoltage()
-                ? hostTile.getInputVoltage()
-                : hostTile.getOutputVoltage();
+        // BUG CONFIRMED via in-game test: a ULV cover on a network generating
+        // 97 EU/t should have overvolted immediately, but read live data
+        // normally instead. Root cause: hostTile.getInputVoltage()/
+        // getOutputVoltage() are hardcoded to return 0L for cable/pipe tile
+        // entities (confirmed via decompile of BaseMetaPipeEntity -- cables
+        // are passive conductors, so GT stubs these "port rating" getters
+        // that only make sense for machines). The real voltage rating lives
+        // on MTECable's own public `mVoltage` field, not these tile-entity-
+        // level getters. This overvolt check has never actually been
+        // reachable -- it was comparing 0 > tier.maxSafeVoltage the entire
+        // time, which is always false.
+        IMetaTileEntity hostMte = hostTile.getMetaTileEntity();
+        long observedVoltage = (hostMte instanceof gregtech.api.metatileentity.implementations.MTECable)
+                ? ((gregtech.api.metatileentity.implementations.MTECable) hostMte).mVoltage
+                : 0L;
 
         if (observedVoltage > tier.maxSafeVoltage) {
             destroy(hostTile, observedVoltage);
