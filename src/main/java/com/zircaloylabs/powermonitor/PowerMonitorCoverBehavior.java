@@ -1,33 +1,15 @@
 package com.zircaloylabs.powermonitor;
 
 import gregtech.api.interfaces.metatileentity.IMetaTileEntity;
-import gregtech.api.interfaces.tileentity.IBasicEnergyContainer;
 import gregtech.api.interfaces.tileentity.IGregTechTileEntity;
-import gregtech.common.covers.Cover;
-
-import java.util.List;
+import gregtech.api.metatileentity.implementations.MTECable;
 
 /**
  * Core behavior for the Power Monitor cover, independent of the specific
- * Cover subclass wiring (GT's cover GUI stack -- ModularScreen/PanelSyncManager
- * -- is version-coupled enough that the actual `extends Cover` subclass and
- * its GUI should be written against your live dev environment rather than
- * blind here; this class holds the logic that GUI/tick-handler calls into).
- *
- * Wiring sketch (to complete against your Cover/CoverContext constructor
- * signatures once you're set up locally):
- *
- *   public class PowerMonitorCover extends Cover {
- *       private final PowerMonitorCoverBehavior behavior;
- *       ...
- *       @Override
- *       public void doCoverThings(byte aRedstone, long aTickTimer) {
- *           behavior.onTick(aTickTimer, (IGregTechTileEntity) getTile());
- *       }
- *   }
- *
- * One instance of this class per placed cover (holds this cover's own
- * history buffer and tier state -- NOT shared/static).
+ * Cover subclass wiring. One instance of this class per placed cover (holds
+ * this cover's own history buffer and tier state -- NOT shared/static).
+ * PowerMonitorCover#doCoverThings calls onTick(); the readout/GUI layer
+ * reads the accessors.
  */
 public class PowerMonitorCoverBehavior {
 
@@ -40,10 +22,15 @@ public class PowerMonitorCoverBehavior {
     private long liveConsumptionEUt = 0L;
     private long liveBufferedEU = 0L;
     private long liveBufferCapacityEU = 0L;
+    private long liveFuelReserveEU = 0L;
+    private long liveMaxGenerationEUt = 0L;
+    private long liveBufferNetChargeEUt = 0L;
+    private long anchorThroughputEUt = 0L; // this cable's rated V * A
     private boolean lastDiscoveryTruncated = false;
     private int lastCablesVisited = 0; // diagnostic, shown in chat readout while chasing the discovery bug
 
     private static final int TICKS_PER_SAMPLE = 20; // 1 Hz at 20 tps
+    private static final int TICKS_PER_SECOND = 20;
 
     public PowerMonitorCoverBehavior(PowerMonitorTier startingTier) {
         setTier(startingTier);
@@ -63,28 +50,18 @@ public class PowerMonitorCoverBehavior {
         return true;
     }
 
-    /**
-     * Call once per tick from Cover#doCoverThings. Internally throttles to 1 Hz
-     * for the actual discovery+sample work -- BFS-ing the whole network every
-     * single tick would be needless overhead for a 2-hour rolling window.
-     */
     private long lastSampleWorldTime = -1L;
 
     /**
      * Call once per tick from Cover#doCoverThings. Internally throttles to ~1 Hz
      * for the actual discovery+sample work.
      *
-     * CONFIRMED BUG (found via in-game test, MV tier): originally gated on
-     * `tickTimer % TICKS_PER_SAMPLE == 0` using the aTickTimer parameter GT
-     * passes into doCoverThings(). That parameter's real semantics were never
-     * verified -- GT covers throttle how often doCoverThings fires at all via
-     * tick-rate settings, so aTickTimer almost certainly isn't "world tick
-     * count incrementing by 1" the way this assumed, and the modulo gate
-     * apparently never landed on zero: peak deficit stayed at Long.MIN_VALUE
-     * (the never-recorded sentinel) with live gen/consumption stuck at 0 on
-     * a network that was genuinely producing and drawing power. Fixed by
-     * gating on real world time (hostTile.getWorld().getTotalWorldTime(),
-     * already fetched independently) instead of GT's internal counter.
+     * Gates on real world time (hostTile.getWorld().getTotalWorldTime()) rather
+     * than the aTickTimer parameter GT passes into doCoverThings() -- that
+     * parameter's semantics interact with GT's own cover tick-rate throttling,
+     * and gating on it was confirmed in-game (MV tier) to never fire: peak
+     * deficit stayed at the never-recorded sentinel with live values stuck at 0
+     * on a network genuinely producing and drawing power.
      */
     public void onTick(long tickTimer, IGregTechTileEntity hostTile) {
         if (destroyed) {
@@ -97,21 +74,23 @@ public class PowerMonitorCoverBehavior {
         }
         lastSampleWorldTime = worldTime;
 
-        // BUG CONFIRMED via in-game test: a ULV cover on a network generating
-        // 97 EU/t should have overvolted immediately, but read live data
-        // normally instead. Root cause: hostTile.getInputVoltage()/
-        // getOutputVoltage() are hardcoded to return 0L for cable/pipe tile
-        // entities (confirmed via decompile of BaseMetaPipeEntity -- cables
-        // are passive conductors, so GT stubs these "port rating" getters
-        // that only make sense for machines). The real voltage rating lives
-        // on MTECable's own public `mVoltage` field, not these tile-entity-
-        // level getters. This overvolt check has never actually been
-        // reachable -- it was comparing 0 > tier.maxSafeVoltage the entire
-        // time, which is always false.
+        // Voltage rating comes from MTECable's own public mVoltage field, NOT
+        // hostTile.getInputVoltage()/getOutputVoltage() -- those are hardcoded
+        // to return 0L for cable/pipe tile entities (confirmed against
+        // BaseMetaPipeEntity: cables are passive conductors, so GT stubs the
+        // "port rating" getters that only make sense for machines). Gating the
+        // overvolt check on the tile-level getters left it comparing
+        // 0 > maxSafeVoltage forever -- confirmed in-game before the fix.
         IMetaTileEntity hostMte = hostTile.getMetaTileEntity();
-        long observedVoltage = (hostMte instanceof gregtech.api.metatileentity.implementations.MTECable)
-                ? ((gregtech.api.metatileentity.implementations.MTECable) hostMte).mVoltage
-                : 0L;
+        long observedVoltage = 0L;
+        if (hostMte instanceof MTECable) {
+            MTECable cable = (MTECable) hostMte;
+            observedVoltage = cable.mVoltage;
+            // Rated network throughput at this specific cable: V * A.
+            // mVoltage/mAmperage are public final fields on MTECable
+            // (verified against GT 5.09.54.20 source).
+            anchorThroughputEUt = cable.mVoltage * cable.mAmperage;
+        }
 
         if (observedVoltage > tier.maxSafeVoltage) {
             destroy(hostTile, observedVoltage);
@@ -127,6 +106,9 @@ public class PowerMonitorCoverBehavior {
         liveConsumptionEUt = snap.totalConsumptionEUt;
         liveBufferedEU = snap.totalBufferedEU;
         liveBufferCapacityEU = snap.totalBufferCapacityEU;
+        liveFuelReserveEU = snap.totalFuelReserveEU;
+        liveMaxGenerationEUt = snap.maxGenerationEUt;
+        liveBufferNetChargeEUt = snap.bufferNetChargeEUt;
 
         if (history != null) {
             history.record(liveConsumptionEUt, liveGenerationEUt, worldTime);
@@ -136,16 +118,10 @@ public class PowerMonitorCoverBehavior {
     /**
      * Same failure mode as jamming a high-voltage line into a low-tier cable --
      * this cover is rated for its tier same as a transformer, so it dies the
-     * same way. Reuses GT's OWN overvolt handling rather than inventing a
-     * separate explosion/burn effect.
-     *
-     * CONFIRMED this session: BaseMetaTileEntity#injectEnergyUnits() checks
-     * `aVoltage > this.getInputVoltage()` and calls `this.doExplosion(aVoltage)`
-     * on overvolt (gregtech.api.metatileentity.BaseMetaTileEntity, ~line 1785).
-     * `doExplosion(long)` is declared directly on IGregTechTileEntity as a
-     * public method, so it's callable on hostTile with no casting. This is
-     * the literal same call GT's own cables/machines use when overvolted --
-     * not a lookalike effect, the real mechanism.
+     * same way. Reuses GT's OWN overvolt handling (doExplosion(long), declared
+     * public on IGregTechTileEntity -- the literal same call GT's cables and
+     * machines make when overvolted, verified against BaseMetaTileEntity
+     * #injectEnergyUnits).
      */
     private void destroy(IGregTechTileEntity hostTile, long observedVoltage) {
         destroyed = true;
@@ -178,6 +154,26 @@ public class PowerMonitorCoverBehavior {
         return liveBufferCapacityEU;
     }
 
+    /** EU-equivalent of fuel in generator tanks/input slots. See NetworkDiscovery fuel notes for scope. */
+    public long getFuelReserveEU() {
+        return liveFuelReserveEU;
+    }
+
+    /** Sum of the network's generators' rated output (their maxEUOutput). */
+    public long getMaxGenerationEUt() {
+        return liveMaxGenerationEUt;
+    }
+
+    /** Net storage flow: >0 buffers charging, <0 discharging (EU/t). */
+    public long getBufferNetChargeEUt() {
+        return liveBufferNetChargeEUt;
+    }
+
+    /** Rated throughput of the cable this cover sits on: voltage * amperage (EU/t). */
+    public long getAnchorThroughputEUt() {
+        return anchorThroughputEUt;
+    }
+
     public boolean isNetworkLargerThanTierSupports() {
         return lastDiscoveryTruncated;
     }
@@ -187,13 +183,18 @@ public class PowerMonitorCoverBehavior {
         return lastCablesVisited;
     }
 
-    /** Seconds until buffer empties at current net drain, or -1 if not draining. */
+    /**
+     * Seconds until buffer empties at current net drain, or -1 if not draining.
+     * (EU divided by EU/t yields TICKS -- the /20 to reach seconds was missing
+     * originally, overstating every runtime 20x. Same fix in the other
+     * time-projection accessors below.)
+     */
     public long getSecondsToEmpty() {
         long net = getLiveNetEUt();
         if (net >= 0 || liveBufferedEU <= 0) {
             return -1;
         }
-        return liveBufferedEU / -net;
+        return liveBufferedEU / -net / TICKS_PER_SECOND;
     }
 
     /** Seconds until buffer fills at current net surplus, or -1 if not charging / already full. */
@@ -203,7 +204,23 @@ public class PowerMonitorCoverBehavior {
         if (net <= 0 || remaining <= 0) {
             return -1;
         }
-        return remaining / net;
+        return remaining / net / TICKS_PER_SECOND;
+    }
+
+    /** Seconds the fuel reserve lasts at the CURRENT generation rate, or -1 if unknowable (no gen / no fuel). */
+    public long getFuelSecondsAtCurrentRate() {
+        if (liveFuelReserveEU <= 0 || liveGenerationEUt <= 0) {
+            return -1;
+        }
+        return liveFuelReserveEU / liveGenerationEUt / TICKS_PER_SECOND;
+    }
+
+    /** Seconds the fuel reserve lasts with every generator at full rated output, or -1 if unknowable. */
+    public long getFuelSecondsAtMaxRate() {
+        if (liveFuelReserveEU <= 0 || liveMaxGenerationEUt <= 0) {
+            return -1;
+        }
+        return liveFuelReserveEU / liveMaxGenerationEUt / TICKS_PER_SECOND;
     }
 
     /** Null if this tier has no history (ULV). */

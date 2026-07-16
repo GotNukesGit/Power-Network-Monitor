@@ -25,14 +25,7 @@ import java.util.List;
  * version. A proper HUD panel is a natural v2 once this compiles and runs
  * in your dev environment.
  *
- * NOT verified this session (do this first when you're back in your IDE,
- * both are quick checks, same pattern as everything else tonight):
- *   - EntityPlayer#addChatMessage / ChatComponentText import paths: these
- *     are standard Forge 1.7.10 deobfuscated names. The jar I decompiled is
- *     the raw runtime jar, so it showed obfuscated func_XXXXX_x names for
- *     vanilla MC methods -- your dev environment applies GTNH's real MCP
- *     mappings, so these should resolve to the ordinary named methods, but
- *     confirm on first compile.
+ * Known limitation:
  *   - Tier persistence: readDataFromNbt/saveDataToNbt below persist the tier
  *     ordinal, but NOT the RollingSampleBuffer history (history resets on
  *     chunk unload/reload). Acceptable v1 limitation -- flag if you want
@@ -97,6 +90,35 @@ public class PowerMonitorCover extends Cover {
         aPlayer.addChatMessage(new ChatComponentText("Generation: " + gen + " EU/t   Consumption: " + cons + " EU/t"));
         aPlayer.addChatMessage(new ChatComponentText((net >= 0 ? "§aSurplus: +" : "§cDeficit: ") + net + " EU/t"));
 
+        long cableLimit = behavior.getAnchorThroughputEUt();
+        if (cableLimit > 0) {
+            aPlayer.addChatMessage(new ChatComponentText("§7This cable: " + cableLimit + " EU/t max throughput"));
+        }
+
+        long maxGen = behavior.getMaxGenerationEUt();
+        long fuel = behavior.getFuelReserveEU();
+        if (maxGen > 0) {
+            aPlayer.addChatMessage(new ChatComponentText(
+                    "Generation capacity: " + maxGen + " EU/t rated (" + (100L * gen / maxGen) + "% in use)"));
+        }
+        if (fuel > 0) {
+            StringBuilder fuelLine = new StringBuilder("Fuel reserves: ").append(fuel).append(" EU");
+            long atCurrent = behavior.getFuelSecondsAtCurrentRate();
+            long atMax = behavior.getFuelSecondsAtMaxRate();
+            if (atCurrent >= 0) {
+                fuelLine.append("  (~").append(formatSeconds(atCurrent)).append(" at current rate");
+                if (atMax >= 0 && atMax != atCurrent) {
+                    fuelLine.append(", ~").append(formatSeconds(atMax)).append(" at full burn");
+                }
+                fuelLine.append(')');
+            } else if (atMax >= 0) {
+                fuelLine.append("  (~").append(formatSeconds(atMax)).append(" at full burn)");
+            }
+            aPlayer.addChatMessage(new ChatComponentText(fuelLine.toString()));
+        } else if (maxGen > 0) {
+            aPlayer.addChatMessage(new ChatComponentText("§eNo fuel in generator tanks/input slots."));
+        }
+
         long bufCap = behavior.getLiveBufferCapacityEU();
         if (bufCap > 0) {
             long buf = behavior.getLiveBufferedEU();
@@ -128,7 +150,7 @@ public class PowerMonitorCover extends Cover {
         }
     }
 
-    private static String formatSeconds(long totalSeconds) {
+    static String formatSeconds(long totalSeconds) { // package-private: also used by PowerMonitorWailaProvider
         long h = totalSeconds / 3600;
         long m = (totalSeconds % 3600) / 60;
         return h > 0 ? (h + "h " + m + "m") : (m + "m");

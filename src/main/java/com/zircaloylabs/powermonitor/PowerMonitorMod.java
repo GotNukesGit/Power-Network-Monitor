@@ -28,6 +28,9 @@ public class PowerMonitorMod {
     }
     @Mod.EventHandler
     public void init(FMLInitializationEvent event) {
-        // Nothing yet -- registration is fully handled in preInit.
+        // Waila registration goes through Waila's IMC handshake, which is
+        // processed between init and postInit -- so the message must be sent
+        // by init at the latest (same phase GT itself sends its own).
+        PowerMonitorWailaProvider.init();
     }
 }
