@@ -66,13 +66,34 @@ public class PowerMonitorCoverBehavior {
      * for the actual discovery+sample work -- BFS-ing the whole network every
      * single tick would be needless overhead for a 2-hour rolling window.
      */
+    private long lastSampleWorldTime = -1L;
+
+    /**
+     * Call once per tick from Cover#doCoverThings. Internally throttles to ~1 Hz
+     * for the actual discovery+sample work.
+     *
+     * CONFIRMED BUG (found via in-game test, MV tier): originally gated on
+     * `tickTimer % TICKS_PER_SAMPLE == 0` using the aTickTimer parameter GT
+     * passes into doCoverThings(). That parameter's real semantics were never
+     * verified -- GT covers throttle how often doCoverThings fires at all via
+     * tick-rate settings, so aTickTimer almost certainly isn't "world tick
+     * count incrementing by 1" the way this assumed, and the modulo gate
+     * apparently never landed on zero: peak deficit stayed at Long.MIN_VALUE
+     * (the never-recorded sentinel) with live gen/consumption stuck at 0 on
+     * a network that was genuinely producing and drawing power. Fixed by
+     * gating on real world time (hostTile.getWorld().getTotalWorldTime(),
+     * already fetched independently) instead of GT's internal counter.
+     */
     public void onTick(long tickTimer, IGregTechTileEntity hostTile) {
         if (destroyed) {
             return;
         }
-        if (tickTimer % TICKS_PER_SAMPLE != 0) {
+
+        long worldTime = hostTile.getWorld() != null ? hostTile.getWorld().getTotalWorldTime() : 0L;
+        if (lastSampleWorldTime >= 0 && worldTime - lastSampleWorldTime < TICKS_PER_SAMPLE) {
             return;
         }
+        lastSampleWorldTime = worldTime;
 
         long observedVoltage = hostTile.getInputVoltage() > hostTile.getOutputVoltage()
                 ? hostTile.getInputVoltage()
@@ -93,7 +114,6 @@ public class PowerMonitorCoverBehavior {
         liveBufferCapacityEU = snap.totalBufferCapacityEU;
 
         if (history != null) {
-            long worldTime = hostTile.getWorld() != null ? hostTile.getWorld().getTotalWorldTime() : 0L;
             history.record(liveConsumptionEUt, liveGenerationEUt, worldTime);
         }
     }

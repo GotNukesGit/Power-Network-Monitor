@@ -96,8 +96,8 @@ public class PowerMonitorCover extends Cover {
         RollingSampleBuffer history = behavior.getHistory();
         if (history != null) {
             aPlayer.addChatMessage(new ChatComponentText(String.format(
-                    "Peak draw (%dh window): %d EU/t",
-                    tier.historySeconds / 3600, history.getPeakConsumption())));
+                    "Peak draw (%s window): %d EU/t",
+                    formatSeconds(tier.historySeconds), history.getPeakConsumption())));
             aPlayer.addChatMessage(new ChatComponentText(String.format(
                     "Peak deficit: %d EU/t", history.getPeakDeficit())));
         } else {
