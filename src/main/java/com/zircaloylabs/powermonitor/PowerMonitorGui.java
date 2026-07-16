@@ -6,6 +6,8 @@ import com.cleanroommc.modularui.value.sync.GenericListSyncHandler;
 import com.cleanroommc.modularui.value.sync.LongSyncValue;
 import com.cleanroommc.modularui.value.sync.PanelSyncManager;
 import com.cleanroommc.modularui.value.sync.StringSyncValue;
+import com.cleanroommc.modularui.screen.ModularPanel;
+import com.cleanroommc.modularui.screen.UISettings;
 import com.cleanroommc.modularui.widgets.layout.Flow;
 
 import gregtech.api.modularui2.CoverGuiData;
@@ -56,10 +58,24 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
     private static final int CHART_HEIGHT = 40;
     private static final int CHART_GAP = 6;
     private static final int CONTENT_WIDTH = CHART_WIDTH * 2 + CHART_GAP;
-    private static final int DIVIDER_COLOR = 0x30FFFFFF; // subtle light rule on the dark cover theme
+    private static final int DIVIDER_COLOR = 0x38FFFFFF; // subtle light rule on the dark panel
+    private static final int PANEL_BG = 0xF60D0F12; // near-black, slightly translucent
+    private static final int CHART_BG = 0xFF10141A; // dark navy plot area, overrides the theme's purple
 
     public PowerMonitorGui(PowerMonitorCover cover) {
         super(cover);
+    }
+
+    /**
+     * Same panel the base class builds, on a near-black background --
+     * explicit widget backgrounds take precedence over the theme's, so this
+     * darkens the panel without touching GT's theme registry.
+     */
+    @Override
+    protected ModularPanel createBasePanel(PanelSyncManager syncManager, UISettings uiSettings, CoverGuiData data) {
+        ModularPanel panel = super.createBasePanel(syncManager, uiSettings, data);
+        panel.background(new Rectangle().color(PANEL_BG).cornerRadius(4));
+        return panel;
     }
 
     @Override
@@ -72,7 +88,8 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue unmet = reg(syncManager, "pm_unmet", b::getLiveUnmetEUt);
         LongSyncValue maxGen = reg(syncManager, "pm_maxgen", b::getMaxGenerationEUt);
         LongSyncValue storageCap = reg(syncManager, "pm_storagecap", b::getStorageDischargeCapEUt);
-        LongSyncValue storageFlow = reg(syncManager, "pm_storageflow", b::getBufferNetChargeEUt);
+        LongSyncValue storageIn = reg(syncManager, "pm_storagein", b::getBufferInEUt);
+        LongSyncValue storageOut = reg(syncManager, "pm_storageout", b::getBufferOutEUt);
         LongSyncValue buf = reg(syncManager, "pm_buf", b::getLiveBufferedEU);
         LongSyncValue bufCap = reg(syncManager, "pm_bufcap", b::getLiveBufferCapacityEU);
         LongSyncValue secEmpty = reg(syncManager, "pm_secempty", b::getSecondsToEmpty);
@@ -85,6 +102,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue machCount = reg(syncManager, "pm_machcount", b::getMachineCount);
         LongSyncValue bufCount = reg(syncManager, "pm_bufcount", b::getBufferCount);
         LongSyncValue cables = reg(syncManager, "pm_cables", b::getLastCablesVisited);
+        LongSyncValue multiCountSync = reg(syncManager, "pm_multis", b::getMultiblockCount);
         LongSyncValue topEUt = reg(syncManager, "pm_topeut", b::getTopConsumerEUt);
         LongSyncValue saturated = reg(syncManager, "pm_sat", () -> b.isSupplySaturated() ? 1L : 0L);
         LongSyncValue truncated = reg(syncManager, "pm_trunc", () -> b.isNetworkLargerThanTierSupports() ? 1L : 0L);
@@ -92,6 +110,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         StringSyncValue topName = regStr(syncManager, "pm_topname", b::getTopConsumerName);
         StringSyncValue schedFull = regStr(syncManager, "pm_schedfull", b::getFuelScheduleFullBurn);
         StringSyncValue schedCur = regStr(syncManager, "pm_schedcur", b::getFuelScheduleCurrent);
+        StringSyncValue deadBuffer = regStr(syncManager, "pm_deadbuf", b::getDeadBufferWarning);
         StringSyncValue outage0 = regStr(syncManager, "pm_outage0", () -> b.getOutageSummary(0));
         StringSyncValue outage1 = regStr(syncManager, "pm_outage1", () -> b.getOutageSummary(1));
 
@@ -144,7 +163,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         row(column, () -> {
             long cap = bufCap.getLongValue();
             if (cap <= 0) {
-                return "\u00a78No storage on network";
+                return "\u00a7fNo storage on network";
             }
             long stored = buf.getLongValue();
             String s = "Charge: \u00a7f" + fmt(stored) + "\u00a7r / " + fmt(cap) + " EU (" + (100L * stored / cap)
@@ -159,20 +178,32 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return s;
         });
 
+        // Gross both-direction flow: net alone hides a series buffer doing
+        // all the work (100 in / 100 out nets to "idle" while every joule
+        // in the base transits it). Matched in/out = pass-through topology,
+        // one-sided = parallel reserve -- readable at a glance.
         row(column, () -> {
             if (bufCap.getLongValue() <= 0) {
                 return "";
             }
-            long flow = storageFlow.getLongValue();
+            long in = storageIn.getLongValue();
+            long out = storageOut.getLongValue();
+            long net = in - out;
             String s;
-            if (flow > 0) {
-                s = "Flow: \u00a7a+" + fmt(flow) + " EU/t charging\u00a7r";
-            } else if (flow < 0) {
-                s = "Flow: \u00a7c" + fmt(flow) + " EU/t discharging\u00a7r";
+            if (in == 0 && out == 0) {
+                s = "Flow: \u00a7fidle";
             } else {
-                s = "Flow: \u00a77idle";
+                s = "Flow: \u00a7ain " + fmt(in) + "\u00a7r / \u00a7cout " + fmt(out) + "\u00a7r EU/t (net "
+                        + (net >= 0 ? "\u00a7a+" : "\u00a7c") + fmt(net) + "\u00a7r)";
             }
-            return s + "   Can supply up to " + fmt(storageCap.getLongValue()) + " EU/t";
+            return s + "   Can push up to " + fmt(storageCap.getLongValue()) + " EU/t";
+        });
+
+        // Root-cause diagnostic for the classic trap: buffer inline,
+        // batteries forgotten, mystery blackout.
+        row(column, () -> {
+            String warn = deadBuffer.getStringValue();
+            return warn.isEmpty() ? "" : "\u00a7c\u26a0 " + warn;
         });
 
         divider(column);
@@ -183,10 +214,10 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         row(column, () -> {
             if (fuel.getLongValue() <= 0) {
                 return maxGen.getLongValue() > 0 ? "\u00a7eNo fuel in generator tanks/slots"
-                        : "\u00a78No generators on network";
+                        : "\u00a7fNo generators on network";
             }
             String sched = schedFull.getStringValue();
-            return "Full burn:  " + (sched.isEmpty() ? "\u00a78n/a" : "\u00a7f" + sched);
+            return "Full burn:  " + (sched.isEmpty() ? "\u00a7fn/a" : "\u00a7f" + sched);
         });
 
         row(column, () -> {
@@ -194,7 +225,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 return "";
             }
             String sched = schedCur.getStringValue();
-            return sched.isEmpty() ? "Current:    \u00a78generators idle" : "Current:    \u00a7f" + sched;
+            return sched.isEmpty() ? "Current:    \u00a7fgenerators idle" : "Current:    \u00a7f" + sched;
         });
 
         divider(column);
@@ -203,11 +234,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         section(column, "NETWORK");
 
         row(column, () -> genCount.getLongValue() + " gen \u00b7 " + machCount.getLongValue() + " machines \u00b7 "
-                + bufCount.getLongValue() + " buffers \u00b7 " + cables.getLongValue() + " cables");
+                + multiCountSync.getLongValue() + " multis \u00b7 " + bufCount.getLongValue() + " buffers \u00b7 "
+                + cables.getLongValue() + " cables");
 
         row(column, () -> {
             long t = topEUt.getLongValue();
-            return t <= 0 ? "Top draw: \u00a78none"
+            return t <= 0 ? "Top draw: \u00a7fnone"
                     : "Top draw: \u00a7f" + topName.getStringValue() + "\u00a7r (" + fmt(t) + " EU/t)";
         });
 
@@ -240,7 +272,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         // ================= CHARTS (2x2) =================
 
         if (b.getHistory() == null) {
-            column.child(IKey.str("\u00a78(Upgrade past ULV for history charts)").asWidget());
+            column.child(IKey.str("\u00a7f(Upgrade past ULV for history charts)").asWidget());
             return;
         }
 
@@ -289,6 +321,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                         Double::equals,
                         null))
                 .widgetTheme(GTWidgetThemes.TESLA_TOWER_CHART)
+                .background(new Rectangle().color(CHART_BG)) // explicit bg wins over the theme's purple
                 .lowerBoundAlwaysZero()
                 .lineWidth(2)
                 .chartUnit(unit)

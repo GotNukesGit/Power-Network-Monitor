@@ -51,6 +51,9 @@ public class PowerMonitorCoverBehavior {
     private long shownDemandEUt = 0L;
     private long shownUnmetEUt = 0L;
     private long shownStorageFlowEUt = 0L;
+    private long shownBufferInEUt = 0L;
+    private long shownBufferOutEUt = 0L;
+    private String deadBufferWarning = "";
     // Saturation hysteresis: warning latches ON after SAT_ON_SAMPLES
     // consecutive positive samples and OFF after SAT_OFF_SAMPLES clear ones,
     // so a threshold-straddling network doesn't strobe the warning.
@@ -78,7 +81,20 @@ public class PowerMonitorCoverBehavior {
         long peakUnmet;
         long demandAtPeak;
         long deliveredAtPeak;
+        String machineName = ""; // set for controller power-loss events, "" for network-level shortfall
     }
+
+    /**
+     * Controllers whose power-loss shutdown we've already logged, so the
+     * persistent wasShutdown() flag produces exactly one outage entry per
+     * incident (cleared when the controller runs again). Weak keys: an
+     * unloaded/broken controller shouldn't be pinned in memory by its
+     * monitor.
+     */
+    private final java.util.Set<Object> loggedShutdowns = java.util.Collections
+            .newSetFromMap(new java.util.WeakHashMap<>());
+
+    private int multiCount = 0;
     private long liveStorageDischargeCapEUt = 0L;
     private int demandMeteredCount = 0;
     private int generatorCount = 0;
@@ -160,6 +176,8 @@ public class PowerMonitorCoverBehavior {
         lastCablesVisited = discovery.cablesVisited;
 
         NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
+        NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
+                discovery.members);
         liveGenerationEUt = snap.totalGenerationEUt;
         liveConsumptionEUt = snap.totalConsumptionEUt;
         liveBufferedEU = snap.totalBufferedEU;
@@ -168,12 +186,13 @@ public class PowerMonitorCoverBehavior {
         liveMaxGenerationEUt = snap.maxGenerationEUt;
         liveBufferNetChargeEUt = snap.bufferNetChargeEUt;
         lastWorldTime = worldTime;
-        liveDemandEUt = snap.totalDemandEUt;
+        liveDemandEUt = snap.totalDemandEUt + multis.demandEUt;
+        multiCount = multis.controllers.size();
         // Unmet = demand minus delivered. Conservative when the network has
         // machines outside demand-metering coverage (their demand isn't
         // counted but their delivered draw is) -- so a positive number here
         // is a REAL shortfall, never a metering artifact.
-        liveUnmetEUt = Math.max(0L, snap.totalDemandEUt - snap.totalConsumptionEUt);
+        liveUnmetEUt = Math.max(0L, liveDemandEUt - snap.totalConsumptionEUt);
         liveStorageDischargeCapEUt = snap.storageDischargeCapacityEUt;
         demandMeteredCount = snap.demandMeteredCount;
         generatorCount = snap.generatorCount;
@@ -181,6 +200,14 @@ public class PowerMonitorCoverBehavior {
         bufferCount = snap.bufferCount;
         topConsumerEUt = snap.topConsumerEUt;
         topConsumerName = snap.topConsumerName;
+        // If the top consumer is an energy hatch we resolved to its owner,
+        // show the machine the player actually recognizes, not the port.
+        if (snap.topConsumerRef != null) {
+            String owner = multis.hatchOwnerName.get(snap.topConsumerRef);
+            if (owner != null) {
+                topConsumerName = owner;
+            }
+        }
 
         // Brownout heuristic (see RollingSampleBuffer#record for why the
         // "deficit" series can't detect this): generation is DELIVERED
@@ -211,8 +238,19 @@ public class PowerMonitorCoverBehavior {
         shownDemandEUt = applyDeadband(shownDemandEUt, liveDemandEUt);
         shownUnmetEUt = applyDeadband(shownUnmetEUt, liveUnmetEUt);
         shownStorageFlowEUt = applyDeadband(shownStorageFlowEUt, liveBufferNetChargeEUt);
+        shownBufferInEUt = applyDeadband(shownBufferInEUt, snap.bufferInEUt);
+        shownBufferOutEUt = applyDeadband(shownBufferOutEUt, snap.bufferOutEUt);
+
+        if (snap.deadBufferNames.isEmpty()) {
+            deadBufferWarning = "";
+        } else {
+            String first = snap.deadBufferNames.get(0);
+            int more = snap.deadBufferNames.size() - 1;
+            deadBufferWarning = first + ": 0 batteries -- output side dead" + (more > 0 ? " (+" + more + " more)" : "");
+        }
 
         trackOutage(worldTime);
+        trackControllerPowerLoss(multis, worldTime);
 
         // Fuel is PER GENERATOR, not a shared pool: when the generator with
         // the least fuel runs dry, network capacity steps down to whatever
@@ -274,6 +312,39 @@ public class PowerMonitorCoverBehavior {
                 activeOutage = null;
             }
         }
+    }
+
+    /**
+     * Multiblocks that die from power loss ZERO their draw the instant they
+     * stop (stopMachine(POWER_LOSS) -- verified against GT source), so the
+     * unmet-demand tracker can never see them. The controller's shutdown
+     * reason is the reliable signal, and it names the machine. wasShutdown()
+     * stays true until the machine restarts, so entries are edge-detected
+     * via loggedShutdowns.
+     */
+    private void trackControllerPowerLoss(NetworkDiscovery.MultiblockSummary multis, long worldTime) {
+        for (NetworkDiscovery.ControllerState c : multis.controllers) {
+            if (c.powerLossShutdown) {
+                if (loggedShutdowns.add(c.tileIdentity)) {
+                    Outage o = new Outage();
+                    o.startTime = worldTime;
+                    o.endTime = worldTime; // instantaneous event: the machine is already dead
+                    o.machineName = c.name;
+                    o.demandAtPeak = liveDemandEUt;
+                    o.deliveredAtPeak = liveConsumptionEUt;
+                    outageLog.addFirst(o);
+                    while (outageLog.size() > OUTAGE_LOG_SIZE) {
+                        outageLog.removeLast();
+                    }
+                }
+            } else {
+                loggedShutdowns.remove(c.tileIdentity); // running again -- re-arm for the next incident
+            }
+        }
+    }
+
+    public int getMultiblockCount() {
+        return multiCount;
     }
 
     /** One display line per logged outage (most recent first, up to 2), or "" if the log is empty. */
@@ -393,6 +464,21 @@ public class PowerMonitorCoverBehavior {
     /** Net storage flow (deadband-smoothed): >0 buffers charging, <0 discharging (EU/t). */
     public long getBufferNetChargeEUt() {
         return shownStorageFlowEUt;
+    }
+
+    /** Gross EU/t entering network storage (deadband-smoothed). */
+    public long getBufferInEUt() {
+        return shownBufferInEUt;
+    }
+
+    /** Gross EU/t leaving network storage (deadband-smoothed). */
+    public long getBufferOutEUt() {
+        return shownBufferOutEUt;
+    }
+
+    /** Named warning for buffers with zero batteries (dead output side), or "" if none. */
+    public String getDeadBufferWarning() {
+        return deadBufferWarning;
     }
 
     /** Rated throughput of the cable this cover sits on: voltage * amperage (EU/t). */

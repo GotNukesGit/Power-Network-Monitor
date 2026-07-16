@@ -8,7 +8,12 @@ import gregtech.api.metatileentity.implementations.MTEBasicBatteryBuffer;
 import gregtech.api.metatileentity.implementations.MTEBasicGenerator;
 import gregtech.api.metatileentity.implementations.MTEBasicMachine;
 import gregtech.api.metatileentity.implementations.MTECable;
+import gregtech.api.metatileentity.implementations.MTEExtendedPowerMultiBlockBase;
+import gregtech.api.metatileentity.implementations.MTEHatchEnergy;
+import gregtech.api.metatileentity.implementations.MTEMultiBlockBase;
 import gregtech.api.metatileentity.implementations.MTETransformer;
+import gregtech.api.interfaces.tileentity.IMachineProgress;
+import net.minecraft.world.World;
 import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraftforge.common.util.ForgeDirection;
@@ -255,6 +260,23 @@ public final class NetworkDiscovery {
         public long bufferNetChargeEUt = 0L;
 
         /**
+         * GROSS storage flow, both directions. Net alone hides a series
+         * buffer doing all the work (100 in / 100 out reads "idle"); gross
+         * makes topology visible: matched in/out = pass-through, one-sided
+         * = parallel reserve.
+         */
+        public long bufferInEUt = 0L;
+        public long bufferOutEUt = 0L;
+
+        /**
+         * Battery buffers with ZERO batteries installed: their output side
+         * is dead (maxAmperesOut() == mBatteryCount == 0, verified against
+         * GT source), which silently kills any series-connected network --
+         * the classic forgotten-batteries trap.
+         */
+        public final List<String> deadBufferNames = new ArrayList<>();
+
+        /**
          * True recipe demand: sum of mEUt over singleblock machines with an
          * active recipe (mMaxProgresstime > 0). Verified against
          * MTEBasicMachine's tick loop (5.09.54.20): a machine that FAILS to
@@ -283,6 +305,7 @@ public final class NetworkDiscovery {
         /** Highest average draw among non-buffer members, for "top consumer" display. */
         public long topConsumerEUt = 0L;
         public String topConsumerName = "";
+        public IBasicEnergyContainer topConsumerRef = null;
 
         /**
          * Per-generator fuel profile: one {avgOutputEUt, ratedEUt, fuelReserveEU}
@@ -316,6 +339,7 @@ public final class NetworkDiscovery {
                 if (avgIn > snap.topConsumerEUt) {
                     snap.topConsumerEUt = avgIn;
                     snap.topConsumerName = localNameOf(container);
+                    snap.topConsumerRef = container;
                 }
             }
 
@@ -351,7 +375,15 @@ public final class NetworkDiscovery {
             snap.totalBufferCapacityEU += container.getEUCapacity();
         }
 
-        snap.bufferNetChargeEUt += container.getAverageElectricInput() - container.getAverageElectricOutput();
+        long in = container.getAverageElectricInput();
+        long out = container.getAverageElectricOutput();
+        snap.bufferNetChargeEUt += in - out;
+        snap.bufferInEUt += in;
+        snap.bufferOutEUt += out;
+
+        if (mte instanceof MTEBasicBatteryBuffer && ((MTEBasicBatteryBuffer) mte).mBatteryCount == 0) {
+            snap.deadBufferNames.add(localNameOf(container));
+        }
     }
 
     /**
@@ -431,6 +463,129 @@ public final class NetworkDiscovery {
             snap.totalDemandEUt += machine.mEUt;
             snap.demandMeteredCount++;
         }
+    }
+
+    // ==================== Multiblock resolution ====================
+
+    /** Per-controller state for one resolution pass. */
+    public static final class ControllerState {
+        public final Object tileIdentity; // controller's base tile, for edge-detecting shutdown events
+        public final String name;
+        public final long demandEUt; // actual usage while running, 0 otherwise
+        public final boolean powerLossShutdown;
+
+        ControllerState(Object tileIdentity, String name, long demandEUt, boolean powerLossShutdown) {
+            this.tileIdentity = tileIdentity;
+            this.name = name;
+            this.demandEUt = demandEUt;
+            this.powerLossShutdown = powerLossShutdown;
+        }
+    }
+
+    public static final class MultiblockSummary {
+        public long demandEUt = 0L;
+        public final List<ControllerState> controllers = new ArrayList<>();
+        /** discovered hatch member -> owning controller name, for display attribution. */
+        public final java.util.Map<IBasicEnergyContainer, String> hatchOwnerName = new java.util.IdentityHashMap<>();
+    }
+
+    /**
+     * Resolves multiblock controllers that own the energy hatches our BFS
+     * discovered, and reads their true recipe demand.
+     *
+     * WHY THE WORLD SCAN: GT hatches hold no reverse pointer to their
+     * controller (verified: MTEHatch's only controller list is the private
+     * ISmartInputHatch watcher mechanism, input hatches only). Controllers
+     * DO hold a public forward list (MTEMultiBlockBase.mEnergyHatches), so
+     * we snapshot the world's loaded tile entities -- we're on the server
+     * thread inside doCoverThings, so toArray() races nothing -- and match
+     * controllers whose hatch list contains one of ours. Identity matching,
+     * ~one instanceof per loaded TE, throttled by the 1 Hz sample gate.
+     *
+     * DEMAND FORMULAS (replicated verbatim from GT source because
+     * getActualEnergyUsage() is protected; sign convention: multiblock
+     * mEUt/lEUt is NEGATIVE while consuming, opposite of singleblocks):
+     *   base:     (-mEUt * 10_000) / max(1000, mEfficiency)
+     *   extended: -lEUt * (10000.0 / max(1000, mEfficiency))
+     *
+     * OUTAGE SIGNAL: a multiblock that loses power calls
+     * stopMachine(ShutDownReasonRegistry.POWER_LOSS), which ZEROES its
+     * draw -- so unmet-demand math can never see a multi die. The shutdown
+     * reason (id "power_loss") on the controller's base tile is the
+     * reliable signal, and it comes with the machine's name for free.
+     *
+     * KNOWN LIMITATION: multis fed exclusively through exotic/multi-amp
+     * (TecTech) hatches match via mExoticEnergyHatches, which is protected
+     * -- those controllers won't resolve. Standard energy hatches cover
+     * the common case.
+     */
+    public static MultiblockSummary resolveMultiblocks(World world, List<IBasicEnergyContainer> members) {
+        MultiblockSummary summary = new MultiblockSummary();
+        if (world == null) {
+            return summary;
+        }
+
+        java.util.Map<Object, IBasicEnergyContainer> ourHatches = new java.util.IdentityHashMap<>();
+        for (IBasicEnergyContainer member : members) {
+            if (member instanceof IGregTechTileEntity) {
+                IMetaTileEntity mte = ((IGregTechTileEntity) member).getMetaTileEntity();
+                if (mte instanceof MTEHatchEnergy) {
+                    ourHatches.put(mte, member);
+                }
+            }
+        }
+        if (ourHatches.isEmpty()) {
+            return summary;
+        }
+
+        Object[] tiles = world.loadedTileEntityList.toArray(); // same-thread snapshot, CME-free
+        for (Object te : tiles) {
+            if (!(te instanceof IGregTechTileEntity)) {
+                continue;
+            }
+            IMetaTileEntity mte = ((IGregTechTileEntity) te).getMetaTileEntity();
+            if (!(mte instanceof MTEMultiBlockBase)) {
+                continue;
+            }
+            MTEMultiBlockBase controller = (MTEMultiBlockBase) mte;
+
+            String name = null;
+            for (MTEHatchEnergy hatch : controller.mEnergyHatches) {
+                IBasicEnergyContainer ours = ourHatches.get(hatch);
+                if (ours != null) {
+                    if (name == null) {
+                        name = controller.getLocalName();
+                    }
+                    summary.hatchOwnerName.put(ours, name);
+                }
+            }
+            if (name == null) {
+                continue; // controller not on our network
+            }
+
+            long demand = 0L;
+            if (controller.mMaxProgresstime > 0) {
+                if (controller instanceof MTEExtendedPowerMultiBlockBase) {
+                    long lEUt = ((MTEExtendedPowerMultiBlockBase<?>) controller).lEUt;
+                    if (lEUt < 0) {
+                        demand = (long) (-lEUt * (10000.0 / Math.max(1000, controller.mEfficiency)));
+                    }
+                } else if (controller.mEUt < 0) {
+                    demand = ((long) -controller.mEUt * 10_000) / Math.max(1000, controller.mEfficiency);
+                }
+            }
+            summary.demandEUt += demand;
+
+            boolean powerLoss = false;
+            Object base = controller.getBaseMetaTileEntity();
+            if (base instanceof IMachineProgress) {
+                IMachineProgress progress = (IMachineProgress) base;
+                powerLoss = progress.wasShutdown() && progress.getLastShutDownReason() != null
+                        && "power_loss".equals(progress.getLastShutDownReason().getID());
+            }
+            summary.controllers.add(new ControllerState(base, name, demand, powerLoss));
+        }
+        return summary;
     }
 
     private static String localNameOf(IBasicEnergyContainer container) {
