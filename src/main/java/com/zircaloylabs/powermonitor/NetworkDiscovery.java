@@ -308,12 +308,30 @@ public final class NetworkDiscovery {
         public IBasicEnergyContainer topConsumerRef = null;
 
         /**
-         * Per-generator fuel profile: one {avgOutputEUt, ratedEUt, fuelReserveEU}
-         * entry per single-block generator, for staged runtime projection
-         * (fuel is per-machine, NOT a shared pool -- when one generator runs
-         * dry, network capacity steps down to the remaining generators).
+         * Per-generator fuel profile for staged runtime projection (fuel is
+         * per-machine, NOT a shared pool -- when one generator runs dry,
+         * network capacity steps down to the remaining generators). Carries
+         * the machine identity so the behavior layer can EMA each
+         * generator's output individually: raw per-machine averages alias
+         * badly (packet boundaries make a steady producer read 77/102
+         * alternately), and the schedule needs per-machine rates, so
+         * smoothing must be per-machine too.
          */
-        public final List<long[]> generatorFuelProfile = new ArrayList<>();
+        public static final class GeneratorProfile {
+            public final IBasicEnergyContainer source;
+            public final long rawOutEUt;
+            public final long ratedEUt;
+            public final long fuelEU;
+
+            GeneratorProfile(IBasicEnergyContainer source, long rawOutEUt, long ratedEUt, long fuelEU) {
+                this.source = source;
+                this.rawOutEUt = rawOutEUt;
+                this.ratedEUt = ratedEUt;
+                this.fuelEU = fuelEU;
+            }
+        }
+
+        public final List<GeneratorProfile> generatorFuelProfile = new ArrayList<>();
     }
 
     public static Snapshot summarize(List<IBasicEnergyContainer> members) {
@@ -439,7 +457,8 @@ public final class NetworkDiscovery {
             }
         }
         snap.totalFuelReserveEU += fuelEU;
-        snap.generatorFuelProfile.add(new long[] { container.getAverageElectricOutput(), rated, fuelEU });
+        snap.generatorFuelProfile
+                .add(new Snapshot.GeneratorProfile(container, container.getAverageElectricOutput(), rated, fuelEU));
         return true;
     }
 

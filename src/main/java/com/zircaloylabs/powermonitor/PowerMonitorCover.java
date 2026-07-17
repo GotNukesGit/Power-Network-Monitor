@@ -54,7 +54,14 @@ public class PowerMonitorCover extends Cover {
      */
     @Override
     public int getMinimumTickRate() {
-        return 20;
+        // 5 = four calls per second. The behavior throttles the heavy work
+        // (BFS, multiblock resolution) to 1 Hz internally; the extra calls
+        // feed the anti-aliasing metering: GT's per-machine averages cover a
+        // 5-tick window, and sampling that once a second beats against the
+        // energy-packet cadence (a steady 90 EU/t machine reads 77/102
+        // alternately). Reading 4x per second and averaging across the
+        // second reconstructs the true mean at the source.
+        return 5;
     }
 
     @Override

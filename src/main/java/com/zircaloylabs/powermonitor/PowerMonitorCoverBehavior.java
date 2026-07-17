@@ -61,12 +61,18 @@ public class PowerMonitorCoverBehavior {
     private long emaBufferIn = -1L;
     private long emaBufferOut = -1L;
     private long emaTopDraw = -1L;
+    private long emaFuelReserve = -1L;
+    private long shownFuelReserveEU = 0L;
+
+    /** Per-generator output EMA, weak-keyed on the machine so removed generators don't linger. */
+    private final java.util.WeakHashMap<gregtech.api.interfaces.tileentity.IBasicEnergyContainer, Long> genOutEma = new java.util.WeakHashMap<>();
     private String emaTopName = "";
 
     private long shownConsumptionEUt = 0L;
     private long shownGenerationEUt = 0L;
     private long shownTopDrawEUt = 0L;
     private long shownLineLossEUt = 0L;
+    private long emaLineLoss = -1L;
 
     /** Per-name EMA of draw, for a stable top-consumers list. Pruned each sample. */
     private final java.util.HashMap<String, Long> drawEmaByName = new java.util.HashMap<>();
@@ -164,6 +170,87 @@ public class PowerMonitorCoverBehavior {
 
     private long lastSampleWorldTime = -1L;
 
+    // ---- 4 Hz anti-aliasing metering ----
+    // Between 1 Hz full passes, every cover tick reads the flow meters on
+    // the CACHED member list (a few dozen getter calls -- no BFS) and
+    // accumulates them; the full pass consumes the per-second averages as
+    // its raw inputs. This reconstructs the true 20-tick mean from GT's
+    // 5-tick windows and kills packet-boundary aliasing at the source,
+    // which no amount of downstream EMA can do without going sluggish.
+    private static final class MeterTap {
+        final gregtech.api.interfaces.tileentity.IBasicEnergyContainer container;
+        final boolean isBuffer;
+        final boolean isGenerator;
+        final String drawName; // owner-or-local name for per-name draw grouping
+
+        MeterTap(gregtech.api.interfaces.tileentity.IBasicEnergyContainer container, boolean isBuffer,
+                boolean isGenerator, String drawName) {
+            this.container = container;
+            this.isBuffer = isBuffer;
+            this.isGenerator = isGenerator;
+            this.drawName = drawName;
+        }
+    }
+
+    private java.util.List<MeterTap> meterTaps = java.util.Collections.emptyList();
+    private int meterSampleCount = 0;
+    private long accCons = 0L, accGen = 0L, accBufIn = 0L, accBufOut = 0L;
+    private final java.util.HashMap<String, Long> accDraw = new java.util.HashMap<>();
+    private final java.util.IdentityHashMap<gregtech.api.interfaces.tileentity.IBasicEnergyContainer, Long> accGenOut = new java.util.IdentityHashMap<>();
+
+    private void subSampleMeters() {
+        for (MeterTap tap : meterTaps) {
+            long in = tap.container.getAverageElectricInput();
+            long out = tap.container.getAverageElectricOutput();
+            if (tap.isBuffer) {
+                accBufIn += Math.max(0L, in);
+                accBufOut += Math.max(0L, out);
+                continue;
+            }
+            if (in > 0) {
+                accCons += in;
+                accDraw.merge(tap.drawName, in, Long::sum);
+            }
+            if (out > 0) {
+                accGen += out;
+            }
+            if (tap.isGenerator) {
+                accGenOut.merge(tap.container, Math.max(0L, out), Long::sum);
+            }
+        }
+        meterSampleCount++;
+    }
+
+    private void rebuildMeterTaps(java.util.List<gregtech.api.interfaces.tileentity.IBasicEnergyContainer> members,
+            NetworkDiscovery.MultiblockSummary multis) {
+        java.util.List<MeterTap> taps = new java.util.ArrayList<>(members.size());
+        for (gregtech.api.interfaces.tileentity.IBasicEnergyContainer member : members) {
+            boolean buffer = NetworkDiscovery.isBatteryBuffer(member);
+            boolean generator = false;
+            String name = "";
+            if (!buffer) {
+                String owner = multis.hatchOwnerName.get(member);
+                name = owner != null ? owner : NetworkDiscovery.localNameOf(member);
+                if (member instanceof gregtech.api.interfaces.tileentity.IGregTechTileEntity) {
+                    generator = ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) member)
+                            .getMetaTileEntity() instanceof gregtech.api.metatileentity.implementations.MTEBasicGenerator;
+                }
+            }
+            taps.add(new MeterTap(member, buffer, generator, name));
+        }
+        meterTaps = taps;
+    }
+
+    private void resetMeterAccumulators() {
+        meterSampleCount = 0;
+        accCons = 0L;
+        accGen = 0L;
+        accBufIn = 0L;
+        accBufOut = 0L;
+        accDraw.clear();
+        accGenOut.clear();
+    }
+
     /**
      * Call once per tick from Cover#doCoverThings. Internally throttles to ~1 Hz
      * for the actual discovery+sample work.
@@ -181,6 +268,7 @@ public class PowerMonitorCoverBehavior {
         }
 
         long worldTime = hostTile.getWorld() != null ? hostTile.getWorld().getTotalWorldTime() : 0L;
+        subSampleMeters(); // 4 Hz metering against the cached member list
         if (lastSampleWorldTime >= 0 && worldTime - lastSampleWorldTime < TICKS_PER_SAMPLE) {
             return;
         }
@@ -216,12 +304,16 @@ public class PowerMonitorCoverBehavior {
         NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
         NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
                 discovery.members);
-        long rawConsumption = snap.totalConsumptionEUt;
-        long rawGeneration = snap.totalGenerationEUt;
+        rebuildMeterTaps(discovery.members, multis);
+        int n = meterSampleCount;
+        long rawConsumption = n > 0 ? accCons / n : snap.totalConsumptionEUt;
+        long rawGeneration = n > 0 ? accGen / n : snap.totalGenerationEUt;
+        long rawBufIn = n > 0 ? accBufIn / n : snap.bufferInEUt;
+        long rawBufOut = n > 0 ? accBufOut / n : snap.bufferOutEUt;
         emaConsumption = ema(emaConsumption, rawConsumption);
         emaGeneration = ema(emaGeneration, rawGeneration);
-        emaBufferIn = ema(emaBufferIn, snap.bufferInEUt);
-        emaBufferOut = ema(emaBufferOut, snap.bufferOutEUt);
+        emaBufferIn = ema(emaBufferIn, rawBufIn);
+        emaBufferOut = ema(emaBufferOut, rawBufOut);
         liveGenerationEUt = emaGeneration;
         liveConsumptionEUt = emaConsumption;
         liveBufferedEU = snap.totalBufferedEU;
@@ -309,7 +401,13 @@ public class PowerMonitorCoverBehavior {
         // aliasing leaves a couple EU/t of residue in this number.
         long absorbed = emaBufferIn - emaBufferOut;
         long lossRaw = Math.max(0L, emaGeneration - emaConsumption - absorbed);
-        shownLineLossEUt = applyDeadband(shownLineLossEUt, lossRaw);
+        // Difference of three signals -- noisiest number on the panel, and a
+        // momentary zero is noise, not "loss stopped". Own EMA without the
+        // zero-snap, then a plain deadband.
+        emaLineLoss = emaLineLoss < 0 ? lossRaw : emaLineLoss + Math.round((lossRaw - emaLineLoss) / 4.0);
+        if (Math.abs(emaLineLoss - shownLineLossEUt) >= Math.max(2L, shownLineLossEUt / 10L)) {
+            shownLineLossEUt = emaLineLoss;
+        }
 
         alertNearbyPlayers(hostTile, worldTime);
 
@@ -341,6 +439,7 @@ public class PowerMonitorCoverBehavior {
             deadBufferWarning = first + ": 0 batteries -- output side dead" + (more > 0 ? " (+" + more + " more)" : "");
         }
 
+        resetMeterAccumulators();
         trackOutage(worldTime);
         trackControllerPowerLoss(multis, worldTime);
         if (lastPowerLossAlert != null) {
@@ -354,8 +453,20 @@ public class PowerMonitorCoverBehavior {
         // the remaining generators can supply. These schedules project that
         // staircase, once at rated output and once at each generator's
         // current output.
-        fuelScheduleFullBurn = buildFuelSchedule(snap.generatorFuelProfile, true);
-        fuelScheduleCurrent = buildFuelSchedule(snap.generatorFuelProfile, false);
+        // Per-generator smoothing before the staircase is built -- see
+        // GeneratorProfile javadoc for why raw per-machine rates flap.
+        java.util.List<long[]> smoothedProfile = new java.util.ArrayList<>(snap.generatorFuelProfile.size());
+        for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
+            Long avgAcc = accGenOut.get(p.source);
+            long rawOut = (avgAcc != null && meterSampleCount > 0) ? avgAcc / meterSampleCount : p.rawOutEUt;
+            long smoothOut = ema(genOutEma.getOrDefault(p.source, -1L), rawOut);
+            genOutEma.put(p.source, smoothOut);
+            smoothedProfile.add(new long[] { smoothOut, p.ratedEUt, p.fuelEU });
+        }
+        emaFuelReserve = ema(emaFuelReserve, snap.totalFuelReserveEU);
+        shownFuelReserveEU = applyDeadband(shownFuelReserveEU, emaFuelReserve);
+        fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true);
+        fuelScheduleCurrent = buildFuelSchedule(smoothedProfile, false);
 
         if (history != null) {
             history.record(rawConsumption, rawGeneration, liveDemandEUt, liveBufferedEU,
@@ -383,16 +494,25 @@ public class PowerMonitorCoverBehavior {
     private void computeTopConsumer(java.util.List<gregtech.api.interfaces.tileentity.IBasicEnergyContainer> members,
             NetworkDiscovery.MultiblockSummary multis) {
         java.util.Map<String, Long> draw = new java.util.HashMap<>();
-        for (gregtech.api.interfaces.tileentity.IBasicEnergyContainer member : members) {
-            if (NetworkDiscovery.isBatteryBuffer(member)) {
-                continue;
+        if (meterSampleCount > 0) {
+            for (java.util.Map.Entry<String, Long> e : accDraw.entrySet()) {
+                long avg = e.getValue() / meterSampleCount;
+                if (avg > 0) {
+                    draw.put(e.getKey(), avg);
+                }
             }
-            long avgIn = member.getAverageElectricInput();
-            if (avgIn <= 0) {
-                continue;
+        } else {
+            for (gregtech.api.interfaces.tileentity.IBasicEnergyContainer member : members) {
+                if (NetworkDiscovery.isBatteryBuffer(member)) {
+                    continue;
+                }
+                long avgIn = member.getAverageElectricInput();
+                if (avgIn <= 0) {
+                    continue;
+                }
+                String owner = multis.hatchOwnerName.get(member);
+                draw.merge(owner != null ? owner : NetworkDiscovery.localNameOf(member), avgIn, Long::sum);
             }
-            String owner = multis.hatchOwnerName.get(member);
-            draw.merge(owner != null ? owner : NetworkDiscovery.localNameOf(member), avgIn, Long::sum);
         }
         // EMA per name; prune names that vanished from the network.
         drawEmaByName.keySet().retainAll(draw.keySet());
@@ -665,9 +785,9 @@ public class PowerMonitorCoverBehavior {
         return liveBufferCapacityEU;
     }
 
-    /** EU-equivalent of fuel in generator tanks/input slots. See NetworkDiscovery fuel notes for scope. */
+    /** EU-equivalent of fuel in generator tanks/input slots (smoothed for display/runtime math). */
     public long getFuelReserveEU() {
-        return liveFuelReserveEU;
+        return shownFuelReserveEU;
     }
 
     /** Sum of the network's generators' rated output (their maxEUOutput). */
@@ -747,18 +867,18 @@ public class PowerMonitorCoverBehavior {
 
     /** Seconds the fuel reserve lasts at the CURRENT generation rate, or -1 if unknowable (no gen / no fuel). */
     public long getFuelSecondsAtCurrentRate() {
-        if (liveFuelReserveEU <= 0 || liveGenerationEUt <= 0) {
+        if (shownFuelReserveEU <= 0 || liveGenerationEUt <= 0) {
             return -1;
         }
-        return liveFuelReserveEU / liveGenerationEUt / TICKS_PER_SECOND;
+        return shownFuelReserveEU / liveGenerationEUt / TICKS_PER_SECOND;
     }
 
     /** Seconds the fuel reserve lasts with every generator at full rated output, or -1 if unknowable. */
     public long getFuelSecondsAtMaxRate() {
-        if (liveFuelReserveEU <= 0 || liveMaxGenerationEUt <= 0) {
+        if (shownFuelReserveEU <= 0 || liveMaxGenerationEUt <= 0) {
             return -1;
         }
-        return liveFuelReserveEU / liveMaxGenerationEUt / TICKS_PER_SECOND;
+        return shownFuelReserveEU / liveMaxGenerationEUt / TICKS_PER_SECOND;
     }
 
     /** True recipe demand (EU/t, deadband-smoothed for display) -- what the network WANTS. */
