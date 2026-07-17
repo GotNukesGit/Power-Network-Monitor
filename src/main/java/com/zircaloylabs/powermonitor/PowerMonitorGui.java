@@ -160,14 +160,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         row(column, () -> {
             long g = gen.getLongValue();
             long m = maxGen.getLongValue();
-            long net = g - cons.getLongValue();
             String s = "\u00a77Generation: \u00a7a" + fmt(g) + "\u00a7r";
             if (m > 0) {
                 s += " / " + fmt(m) + " EU/t (" + (100L * g / m) + "%)";
             } else {
                 s += " EU/t";
             }
-            s += " \u00a77Net: " + (net >= 0 ? "\u00a7a+" : "\u00a7c") + fmt(net);
             return s;
         });
 
