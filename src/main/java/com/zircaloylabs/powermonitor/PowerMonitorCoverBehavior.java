@@ -66,6 +66,7 @@ public class PowerMonitorCoverBehavior {
 
     /** Per-generator output EMA, weak-keyed on the machine so removed generators don't linger. */
     private final java.util.WeakHashMap<gregtech.api.interfaces.tileentity.IBasicEnergyContainer, Long> genOutEma = new java.util.WeakHashMap<>();
+    private final java.util.WeakHashMap<gregtech.api.interfaces.tileentity.IBasicEnergyContainer, Long> genOutShown = new java.util.WeakHashMap<>();
     private String emaTopName = "";
 
     private long shownConsumptionEUt = 0L;
@@ -84,6 +85,18 @@ public class PowerMonitorCoverBehavior {
     private static final int ALERT_RADIUS = 64;
     private static final long ALERT_MIN_INTERVAL_TICKS = 30L * 20L;
     private int lastAlertedStatus = STATUS_HEALTHY;
+
+    /**
+     * Login/startup grace: machines resume their saved recipes instantly
+     * (demand appears at full strength) while generator output averages
+     * spin up from zero over the first seconds -- a guaranteed phantom
+     * "demand 180 vs 16 delivered" if the trackers run during the ramp.
+     * The first WARMUP_SAMPLES full passes compute everything but hold
+     * status at HEALTHY and record no outages or alerts.
+     */
+    private static final int WARMUP_SAMPLES = 10;
+    private int warmupSamplesRemaining = WARMUP_SAMPLES;
+    private boolean warmingUp = true;
     private long lastAlertTime = -ALERT_MIN_INTERVAL_TICKS;
     private long shownDemandEUt = 0L;
     private long shownUnmetEUt = 0L;
@@ -273,6 +286,10 @@ public class PowerMonitorCoverBehavior {
             return;
         }
         lastSampleWorldTime = worldTime;
+        warmingUp = warmupSamplesRemaining > 0;
+        if (warmingUp) {
+            warmupSamplesRemaining--;
+        }
 
         // Voltage rating comes from MTECable's own public mVoltage field, NOT
         // hostTile.getInputVoltage()/getOutputVoltage() -- those are hardcoded
@@ -393,6 +410,11 @@ public class PowerMonitorCoverBehavior {
         storedEtaSeconds = storageDrainEUt > flowSignificanceFloor() && liveBufferedEU > 0
                 ? liveBufferedEU / storageDrainEUt / TICKS_PER_SECOND
                 : -1L;
+        if (warmingUp) {
+            shownStatus = STATUS_HEALTHY;
+            statusUpStreak = 0;
+            statusDownStreak = 0;
+        }
         supplySaturated = shownStatus >= STATUS_ON_STORED;
 
         // Line loss estimate from energy balance: what generators emit minus
@@ -461,7 +483,9 @@ public class PowerMonitorCoverBehavior {
             long rawOut = (avgAcc != null && meterSampleCount > 0) ? avgAcc / meterSampleCount : p.rawOutEUt;
             long smoothOut = ema(genOutEma.getOrDefault(p.source, -1L), rawOut);
             genOutEma.put(p.source, smoothOut);
-            smoothedProfile.add(new long[] { smoothOut, p.ratedEUt, p.fuelEU });
+            long shownOut = applyDeadband(genOutShown.getOrDefault(p.source, 0L), smoothOut);
+            genOutShown.put(p.source, shownOut);
+            smoothedProfile.add(new long[] { shownOut, p.ratedEUt, p.fuelEU });
         }
         emaFuelReserve = ema(emaFuelReserve, snap.totalFuelReserveEU);
         shownFuelReserveEU = applyDeadband(shownFuelReserveEU, emaFuelReserve);
@@ -551,6 +575,9 @@ public class PowerMonitorCoverBehavior {
     }
 
     private void alertNearbyPlayers(IGregTechTileEntity hostTile, long worldTime) {
+        if (warmingUp) {
+            return;
+        }
         String message = null;
         if (shownStatus > lastAlertedStatus && shownStatus >= STATUS_ON_STORED
                 && worldTime - lastAlertTime >= ALERT_MIN_INTERVAL_TICKS) {
@@ -613,11 +640,16 @@ public class PowerMonitorCoverBehavior {
             return 0L;
         }
         long delta = Math.abs(actual - displayed);
-        long threshold = Math.max(5L, Math.max(Math.abs(displayed), Math.abs(actual)) / 10L); // 10%
+        long threshold = Math.max(2L, Math.max(Math.abs(displayed), Math.abs(actual)) / 50L); // 2%
         return delta >= threshold ? actual : displayed;
     }
 
     private void trackOutage(long worldTime) {
+        if (warmingUp) {
+            outageOnStreak = 0;
+            outageOffStreak = 0;
+            return;
+        }
         boolean shortfall = liveUnmetEUt > 0;
         if (shortfall) {
             outageOnStreak++;
@@ -658,6 +690,14 @@ public class PowerMonitorCoverBehavior {
     private void trackControllerPowerLoss(NetworkDiscovery.MultiblockSummary multis, long worldTime) {
         for (NetworkDiscovery.ControllerState c : multis.controllers) {
             if (c.powerLossShutdown) {
+                if (warmingUp) {
+                    // GT PERSISTS shutdown reasons to NBT, so a controller
+                    // power-lossed before logout re-reports on login. Seed
+                    // the edge detector silently: only shutdowns that happen
+                    // AFTER warmup produce events and alerts.
+                    loggedShutdowns.add(c.tileIdentity);
+                    continue;
+                }
                 if (loggedShutdowns.add(c.tileIdentity)) {
                     lastPowerLossAlert = c.name; // picked up by onTick's host reference below
                     Outage o = new Outage();
@@ -679,6 +719,14 @@ public class PowerMonitorCoverBehavior {
 
     public int getMultiblockCount() {
         return multiCount;
+    }
+
+    /** Player pressed the ack button in the GUI: clear the outage log (server-side). */
+    public void acknowledgeOutages() {
+        outageLog.clear();
+        activeOutage = null;
+        outageOnStreak = 0;
+        outageOffStreak = 0;
     }
 
     /** One display line per logged outage (most recent first, up to 2), or "" if the log is empty. */

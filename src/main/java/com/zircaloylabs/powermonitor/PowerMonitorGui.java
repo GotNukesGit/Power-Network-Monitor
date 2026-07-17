@@ -5,7 +5,9 @@ import com.cleanroommc.modularui.drawable.Rectangle;
 import com.cleanroommc.modularui.value.sync.GenericListSyncHandler;
 import com.cleanroommc.modularui.value.sync.LongSyncValue;
 import com.cleanroommc.modularui.value.sync.PanelSyncManager;
+import com.cleanroommc.modularui.value.sync.InteractionSyncHandler;
 import com.cleanroommc.modularui.value.sync.StringSyncValue;
+import com.cleanroommc.modularui.widgets.ButtonWidget;
 import com.cleanroommc.modularui.drawable.ItemDrawable;
 import com.cleanroommc.modularui.screen.ModularPanel;
 import com.cleanroommc.modularui.screen.UISettings;
@@ -303,8 +305,14 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return line.isEmpty() ? "" : "\u00a77         \u00a7f" + line;
         });
 
-        row(column, () -> "\u00a77This cable: \u00a7f" + fmt(cable.getLongValue()) + "\u00a77 EU/t max  Peak demand: \u00a7f"
-                + fmt(peakDemand.getLongValue()) + "\u00a77  Peak drain: \u00a7f" + fmt(peakDrain.getLongValue()));
+        row(column, () -> {
+            String s = "\u00a77This cable: \u00a7f" + fmt(cable.getLongValue()) + "\u00a77 EU/t max  Peak demand: \u00a7f"
+                    + fmt(peakDemand.getLongValue());
+            if (bufCap.getLongValue() > 0) { // "drain" is storage drain by definition -- meaningless without storage
+                s += "\u00a77  Peak drain: \u00a7f" + fmt(peakDrain.getLongValue());
+            }
+            return s;
+        });
 
         // Status slot -- always present so the panel doesn't reflow. Tiered:
         // a network coasting on storage is NOT browning out yet, and the
@@ -337,6 +345,17 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             String o = outage1.getStringValue();
             return o.isEmpty() ? "" : "\u00a7cOutage: " + o;
         });
+        column.child(new ButtonWidget<>()
+                .overlay(IKey.str("\u00a7fack"))
+                .size(28, 11)
+                .tooltipStatic(t -> t.addLine("\u00a77Acknowledge outages (clears the log)"))
+                .syncHandler(new InteractionSyncHandler().setOnMousePressed(mouseData -> {
+                    if (!mouseData.isClient()) {
+                        b.acknowledgeOutages();
+                    }
+                }))
+                .setEnabledIf(w -> !outage0.getStringValue().isEmpty())
+                .marginBottom(2));
 
         divider(column);
 

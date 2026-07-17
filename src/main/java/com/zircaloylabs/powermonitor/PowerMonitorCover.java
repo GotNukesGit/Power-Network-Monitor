@@ -167,6 +167,9 @@ public class PowerMonitorCover extends Cover {
     }
 
     static String formatSeconds(long totalSeconds) { // package-private: also used by PowerMonitorWailaProvider
+        if (totalSeconds < 60) {
+            return totalSeconds + "s";
+        }
         long h = totalSeconds / 3600;
         long m = (totalSeconds % 3600) / 60;
         return h > 0 ? (h + "h " + m + "m") : (m + "m");
