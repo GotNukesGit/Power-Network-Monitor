@@ -94,7 +94,8 @@ public class PowerMonitorWailaProvider implements IWailaDataProvider {
             t.setLong("fuelSecCur", b.getFuelSecondsAtCurrentRate());
             t.setLong("fuelSecMax", b.getFuelSecondsAtMaxRate());
             t.setBoolean("trunc", b.isNetworkLargerThanTierSupports());
-            t.setBoolean("sat", b.isSupplySaturated());
+            t.setLong("status", b.getSupplyStatus());
+            t.setLong("storedEta", b.getStoredEtaSeconds());
             t.setLong("unmet", b.getLiveUnmetEUt());
             tag.setTag(NBT_KEY, t);
             break; // network numbers are identical from any monitor on this cable

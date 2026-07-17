@@ -588,7 +588,7 @@ public final class NetworkDiscovery {
         return summary;
     }
 
-    private static String localNameOf(IBasicEnergyContainer container) {
+    public static String localNameOf(IBasicEnergyContainer container) {
         if (container instanceof IGregTechTileEntity) {
             IMetaTileEntity mte = ((IGregTechTileEntity) container).getMetaTileEntity();
             if (mte != null) {
@@ -617,7 +617,7 @@ public final class NetworkDiscovery {
      * IGregTechTileEntity -- so we go through getMetaTileEntity() to reach
      * the logic class these instanceof checks need.
      */
-    private static boolean isBatteryBuffer(IBasicEnergyContainer container) {
+    public static boolean isBatteryBuffer(IBasicEnergyContainer container) {
         if (!(container instanceof IGregTechTileEntity)) {
             return false;
         }

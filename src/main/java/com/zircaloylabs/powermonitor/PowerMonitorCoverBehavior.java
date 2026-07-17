@@ -57,11 +57,18 @@ public class PowerMonitorCoverBehavior {
     // Saturation hysteresis: warning latches ON after SAT_ON_SAMPLES
     // consecutive positive samples and OFF after SAT_OFF_SAMPLES clear ones,
     // so a threshold-straddling network doesn't strobe the warning.
-    private int satOnStreak = 0;
-    private int satOffStreak = 0;
-    private boolean satLatched = false;
-    private static final int SAT_ON_SAMPLES = 2;
-    private static final int SAT_OFF_SAMPLES = 5;
+    // Tiered supply status (latched with hysteresis -- escalates after 2
+    // consecutive samples at the higher level, de-escalates after 5 below):
+    public static final int STATUS_HEALTHY = 0;
+    public static final int STATUS_AT_CAPACITY = 1; // generation pinned, no headroom, but keeping up
+    public static final int STATUS_ON_STORED = 2; // storage covering the gap; brownout when it empties
+    public static final int STATUS_BROWNOUT = 3; // demand measurably exceeds total supply
+    private int shownStatus = STATUS_HEALTHY;
+    private int statusUpStreak = 0;
+    private int statusDownStreak = 0;
+    private long storedEtaSeconds = -1L;
+    private static final int STATUS_UP_SAMPLES = 2;
+    private static final int STATUS_DOWN_SAMPLES = 5;
     // Outage black box: opens an event after OUTAGE_ON consecutive samples
     // with unmet demand, closes after OUTAGE_OFF clear samples, and records
     // the worst moment (peak unmet + the demand/delivered pair at that
@@ -198,16 +205,10 @@ public class PowerMonitorCoverBehavior {
         generatorCount = snap.generatorCount;
         machineCount = snap.machineCount;
         bufferCount = snap.bufferCount;
-        topConsumerEUt = snap.topConsumerEUt;
-        topConsumerName = snap.topConsumerName;
-        // If the top consumer is an energy hatch we resolved to its owner,
-        // show the machine the player actually recognizes, not the port.
-        if (snap.topConsumerRef != null) {
-            String owner = multis.hatchOwnerName.get(snap.topConsumerRef);
-            if (owner != null) {
-                topConsumerName = owner;
-            }
-        }
+        // Top draw, aggregated per OWNER: a multiblock's hatches are ports of
+        // one machine, so their draws sum under the controller's name (an
+        // EBF on two 62 EU/t hatches is one 124 EU/t consumer, not two).
+        computeTopConsumer(discovery.members, multis);
 
         // Brownout heuristic (see RollingSampleBuffer#record for why the
         // "deficit" series can't detect this): generation is DELIVERED
@@ -215,23 +216,56 @@ public class PowerMonitorCoverBehavior {
         // storage is empty (or absent), any additional demand is invisible
         // to the meters -- machines just starve. Generators >= 95% of rated
         // + buffers <= 2% full is the strongest honest signal available.
-        boolean satRaw = liveUnmetEUt > 0
-                || (liveMaxGenerationEUt > 0 && liveGenerationEUt * 100 >= liveMaxGenerationEUt * 95
-                        && (liveBufferCapacityEU <= 0 || liveBufferedEU * 50 <= liveBufferCapacityEU));
-        if (satRaw) {
-            satOnStreak++;
-            satOffStreak = 0;
-            if (satOnStreak >= SAT_ON_SAMPLES) {
-                satLatched = true;
+        // ---- Loss-aware shortfall ----
+        // Delivered is metered at the machines, AFTER cable loss; generation
+        // at the sources, BEFORE it. On a healthy network demand can exceed
+        // delivered by exactly the line loss (seen in the field: demand 120,
+        // delivered 114, generation 132 -- 6 EU/t died in six lossy cables,
+        // nothing was starving). So a shortfall only counts when demand
+        // exceeds BOTH meters, and only above a 2% jitter/loss floor.
+        long effectiveDelivered = Math.max(liveConsumptionEUt, liveGenerationEUt);
+        long rawShortfall = Math.max(0L, liveDemandEUt - effectiveDelivered);
+        long shortfallFloor = Math.max(2L, liveDemandEUt / 50L);
+        liveUnmetEUt = rawShortfall > shortfallFloor ? rawShortfall : 0L;
+
+        // ---- Tiered status ----
+        long storageDrainEUt = 0L; // gross out minus in: >0 means storage is covering load
+        storageDrainEUt = Math.max(0L, snap.bufferOutEUt - snap.bufferInEUt);
+        boolean genPinned = liveMaxGenerationEUt > 0 && liveGenerationEUt * 100 >= liveMaxGenerationEUt * 95;
+        int rawStatus;
+        if (liveUnmetEUt > 0) {
+            rawStatus = STATUS_BROWNOUT;
+        } else if (storageDrainEUt > shortfallFloor && liveBufferedEU > 0 && genPinned) {
+            rawStatus = STATUS_ON_STORED;
+        } else if (genPinned) {
+            rawStatus = STATUS_AT_CAPACITY;
+        } else {
+            rawStatus = STATUS_HEALTHY;
+        }
+        if (rawStatus > shownStatus) {
+            statusUpStreak++;
+            statusDownStreak = 0;
+            if (statusUpStreak >= STATUS_UP_SAMPLES) {
+                shownStatus = rawStatus;
+                statusUpStreak = 0;
+            }
+        } else if (rawStatus < shownStatus) {
+            statusDownStreak++;
+            statusUpStreak = 0;
+            if (statusDownStreak >= STATUS_DOWN_SAMPLES) {
+                shownStatus = rawStatus;
+                statusDownStreak = 0;
             }
         } else {
-            satOffStreak++;
-            satOnStreak = 0;
-            if (satOffStreak >= SAT_OFF_SAMPLES) {
-                satLatched = false;
-            }
+            statusUpStreak = 0;
+            statusDownStreak = 0;
         }
-        supplySaturated = satLatched;
+        // Countdown to storage exhaustion at the CURRENT drain rate (from
+        // the buffers' own meters, not cons-minus-gen).
+        storedEtaSeconds = storageDrainEUt > 0 && liveBufferedEU > 0
+                ? liveBufferedEU / storageDrainEUt / TICKS_PER_SECOND
+                : -1L;
+        supplySaturated = shownStatus >= STATUS_ON_STORED;
 
         // Display smoothing: 5% deadband (min 2 EU/t step) on the noisiest
         // readouts; zero always snaps immediately so an idle network reads 0.
@@ -277,12 +311,55 @@ public class PowerMonitorCoverBehavior {
         }
     }
 
+    private void computeTopConsumer(java.util.List<gregtech.api.interfaces.tileentity.IBasicEnergyContainer> members,
+            NetworkDiscovery.MultiblockSummary multis) {
+        java.util.Map<String, Long> ownerDraw = new java.util.HashMap<>();
+        long bestStandalone = 0L;
+        String bestStandaloneName = "";
+        for (gregtech.api.interfaces.tileentity.IBasicEnergyContainer member : members) {
+            if (NetworkDiscovery.isBatteryBuffer(member)) {
+                continue;
+            }
+            long avgIn = member.getAverageElectricInput();
+            if (avgIn <= 0) {
+                continue;
+            }
+            String owner = multis.hatchOwnerName.get(member);
+            if (owner != null) {
+                ownerDraw.merge(owner, avgIn, Long::sum);
+            } else if (avgIn > bestStandalone) {
+                bestStandalone = avgIn;
+                bestStandaloneName = NetworkDiscovery.localNameOf(member);
+            }
+        }
+        long best = bestStandalone;
+        String bestName = bestStandaloneName;
+        for (java.util.Map.Entry<String, Long> e : ownerDraw.entrySet()) {
+            if (e.getValue() > best) {
+                best = e.getValue();
+                bestName = e.getKey();
+            }
+        }
+        topConsumerEUt = best;
+        topConsumerName = bestName;
+    }
+
+    /** 0=healthy, 1=at capacity, 2=running on stored EU, 3=brownout. Latched with hysteresis. */
+    public int getSupplyStatus() {
+        return shownStatus;
+    }
+
+    /** Seconds until storage exhausts at current drain (from buffer meters), or -1. */
+    public long getStoredEtaSeconds() {
+        return storedEtaSeconds;
+    }
+
     private static long applyDeadband(long displayed, long actual) {
         if (actual == 0L) {
             return 0L;
         }
         long delta = Math.abs(actual - displayed);
-        long threshold = Math.max(2L, Math.max(Math.abs(displayed), Math.abs(actual)) / 20L); // 5%
+        long threshold = Math.max(5L, Math.max(Math.abs(displayed), Math.abs(actual)) / 10L); // 10%
         return delta >= threshold ? actual : displayed;
     }
 
