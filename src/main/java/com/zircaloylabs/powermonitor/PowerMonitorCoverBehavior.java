@@ -48,6 +48,37 @@ public class PowerMonitorCoverBehavior {
     // Deadband-smoothed display copies (see applyDeadband) -- raw values feed
     // history/charts, smoothed values feed all live readouts so single-sample
     // jitter doesn't make the numbers flicker.
+    // Stage 1: exponential moving average (~4 s time constant) applied at
+    // the source to every MEASURED channel. GT delivers energy in discrete
+    // voltage packets and averages over a 5-tick window; sampling that at
+    // 1 Hz aliases (a constant 120 EU/t draw reads 114/122 alternately as
+    // packet boundaries slide across the window). The EMA integrates the
+    // packet noise back out; the deadband (stage 2) then pins the display.
+    // Charts and peaks intentionally keep RAW samples -- instruments show
+    // the smoothed truth, history shows what the meter actually read.
+    private long emaConsumption = -1L;
+    private long emaGeneration = -1L;
+    private long emaBufferIn = -1L;
+    private long emaBufferOut = -1L;
+    private long emaTopDraw = -1L;
+    private String emaTopName = "";
+
+    private long shownConsumptionEUt = 0L;
+    private long shownGenerationEUt = 0L;
+    private long shownTopDrawEUt = 0L;
+    private long shownLineLossEUt = 0L;
+
+    /** Per-name EMA of draw, for a stable top-consumers list. Pruned each sample. */
+    private final java.util.HashMap<String, Long> drawEmaByName = new java.util.HashMap<>();
+    private volatile String[] topConsumers = new String[0]; // pre-formatted display lines
+
+    // Chat alerting: escalations to ON_STORED/BROWNOUT and named power-loss
+    // events get announced to nearby players (the dashboard only helps if
+    // you're looking at it). Rate-limited; a recovery message re-arms it.
+    private static final int ALERT_RADIUS = 64;
+    private static final long ALERT_MIN_INTERVAL_TICKS = 30L * 20L;
+    private int lastAlertedStatus = STATUS_HEALTHY;
+    private long lastAlertTime = -ALERT_MIN_INTERVAL_TICKS;
     private long shownDemandEUt = 0L;
     private long shownUnmetEUt = 0L;
     private long shownStorageFlowEUt = 0L;
@@ -185,8 +216,14 @@ public class PowerMonitorCoverBehavior {
         NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
         NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
                 discovery.members);
-        liveGenerationEUt = snap.totalGenerationEUt;
-        liveConsumptionEUt = snap.totalConsumptionEUt;
+        long rawConsumption = snap.totalConsumptionEUt;
+        long rawGeneration = snap.totalGenerationEUt;
+        emaConsumption = ema(emaConsumption, rawConsumption);
+        emaGeneration = ema(emaGeneration, rawGeneration);
+        emaBufferIn = ema(emaBufferIn, snap.bufferInEUt);
+        emaBufferOut = ema(emaBufferOut, snap.bufferOutEUt);
+        liveGenerationEUt = emaGeneration;
+        liveConsumptionEUt = emaConsumption;
         liveBufferedEU = snap.totalBufferedEU;
         liveBufferCapacityEU = snap.totalBufferCapacityEU;
         liveFuelReserveEU = snap.totalFuelReserveEU;
@@ -229,8 +266,7 @@ public class PowerMonitorCoverBehavior {
         liveUnmetEUt = rawShortfall > shortfallFloor ? rawShortfall : 0L;
 
         // ---- Tiered status ----
-        long storageDrainEUt = 0L; // gross out minus in: >0 means storage is covering load
-        storageDrainEUt = Math.max(0L, snap.bufferOutEUt - snap.bufferInEUt);
+        long storageDrainEUt = Math.max(0L, emaBufferOut - emaBufferIn); // >0: storage covering load
         boolean genPinned = liveMaxGenerationEUt > 0 && liveGenerationEUt * 100 >= liveMaxGenerationEUt * 95;
         int rawStatus;
         if (liveUnmetEUt > 0) {
@@ -262,18 +298,40 @@ public class PowerMonitorCoverBehavior {
         }
         // Countdown to storage exhaustion at the CURRENT drain rate (from
         // the buffers' own meters, not cons-minus-gen).
-        storedEtaSeconds = storageDrainEUt > 0 && liveBufferedEU > 0
+        storedEtaSeconds = storageDrainEUt > flowSignificanceFloor() && liveBufferedEU > 0
                 ? liveBufferedEU / storageDrainEUt / TICKS_PER_SECOND
                 : -1L;
         supplySaturated = shownStatus >= STATUS_ON_STORED;
+
+        // Line loss estimate from energy balance: what generators emit minus
+        // what machines receive minus what storage absorbed must have died
+        // in the cables. Smoothed inputs, clamped, ~labelled -- packet
+        // aliasing leaves a couple EU/t of residue in this number.
+        long absorbed = emaBufferIn - emaBufferOut;
+        long lossRaw = Math.max(0L, emaGeneration - emaConsumption - absorbed);
+        shownLineLossEUt = applyDeadband(shownLineLossEUt, lossRaw);
+
+        alertNearbyPlayers(hostTile, worldTime);
 
         // Display smoothing: 5% deadband (min 2 EU/t step) on the noisiest
         // readouts; zero always snaps immediately so an idle network reads 0.
         shownDemandEUt = applyDeadband(shownDemandEUt, liveDemandEUt);
         shownUnmetEUt = applyDeadband(shownUnmetEUt, liveUnmetEUt);
-        shownStorageFlowEUt = applyDeadband(shownStorageFlowEUt, liveBufferNetChargeEUt);
-        shownBufferInEUt = applyDeadband(shownBufferInEUt, snap.bufferInEUt);
-        shownBufferOutEUt = applyDeadband(shownBufferOutEUt, snap.bufferOutEUt);
+        shownStorageFlowEUt = applyDeadband(shownStorageFlowEUt, emaBufferIn - emaBufferOut);
+        shownBufferInEUt = applyDeadband(shownBufferInEUt, emaBufferIn);
+        shownBufferOutEUt = applyDeadband(shownBufferOutEUt, emaBufferOut);
+        shownConsumptionEUt = applyDeadband(shownConsumptionEUt, emaConsumption);
+        shownGenerationEUt = applyDeadband(shownGenerationEUt, emaGeneration);
+        // Top draw: EMA keyed on the name -- resets instantly when the top
+        // consumer CHANGES, smooths while it's the same machine.
+        if (topConsumerName.equals(emaTopName)) {
+            emaTopDraw = ema(emaTopDraw, topConsumerEUt);
+        } else {
+            emaTopName = topConsumerName;
+            emaTopDraw = topConsumerEUt;
+            shownTopDrawEUt = topConsumerEUt;
+        }
+        shownTopDrawEUt = applyDeadband(shownTopDrawEUt, emaTopDraw);
 
         if (snap.deadBufferNames.isEmpty()) {
             deadBufferWarning = "";
@@ -285,6 +343,11 @@ public class PowerMonitorCoverBehavior {
 
         trackOutage(worldTime);
         trackControllerPowerLoss(multis, worldTime);
+        if (lastPowerLossAlert != null) {
+            broadcastNearby(hostTile, "\u00a76[Power Monitor] \u00a7c\u26a0 " + lastPowerLossAlert
+                    + " shut down: power loss.");
+            lastPowerLossAlert = null;
+        }
 
         // Fuel is PER GENERATOR, not a shared pool: when the generator with
         // the least fuel runs dry, network capacity steps down to whatever
@@ -295,7 +358,7 @@ public class PowerMonitorCoverBehavior {
         fuelScheduleCurrent = buildFuelSchedule(snap.generatorFuelProfile, false);
 
         if (history != null) {
-            history.record(liveConsumptionEUt, liveGenerationEUt, liveDemandEUt, liveBufferedEU,
+            history.record(rawConsumption, rawGeneration, liveDemandEUt, liveBufferedEU,
                     liveFuelReserveEU, worldTime);
             java.util.List<Double> cons = new java.util.ArrayList<>(CHART_MAX_POINTS);
             java.util.List<Double> gen = new java.util.ArrayList<>(CHART_MAX_POINTS);
@@ -311,11 +374,15 @@ public class PowerMonitorCoverBehavior {
         }
     }
 
+    /**
+     * Draw grouped by NAME: a multiblock's hatches sum under its controller's
+     * name, and same-named singleblocks sum together too ("3 Macerators
+     * pulling 96 total" is the answer a player triaging load actually wants).
+     * Per-name EMA keeps the ranking stable against packet aliasing.
+     */
     private void computeTopConsumer(java.util.List<gregtech.api.interfaces.tileentity.IBasicEnergyContainer> members,
             NetworkDiscovery.MultiblockSummary multis) {
-        java.util.Map<String, Long> ownerDraw = new java.util.HashMap<>();
-        long bestStandalone = 0L;
-        String bestStandaloneName = "";
+        java.util.Map<String, Long> draw = new java.util.HashMap<>();
         for (gregtech.api.interfaces.tileentity.IBasicEnergyContainer member : members) {
             if (NetworkDiscovery.isBatteryBuffer(member)) {
                 continue;
@@ -325,23 +392,82 @@ public class PowerMonitorCoverBehavior {
                 continue;
             }
             String owner = multis.hatchOwnerName.get(member);
-            if (owner != null) {
-                ownerDraw.merge(owner, avgIn, Long::sum);
-            } else if (avgIn > bestStandalone) {
-                bestStandalone = avgIn;
-                bestStandaloneName = NetworkDiscovery.localNameOf(member);
+            draw.merge(owner != null ? owner : NetworkDiscovery.localNameOf(member), avgIn, Long::sum);
+        }
+        // EMA per name; prune names that vanished from the network.
+        drawEmaByName.keySet().retainAll(draw.keySet());
+        for (java.util.Map.Entry<String, Long> e : draw.entrySet()) {
+            drawEmaByName.merge(e.getKey(), e.getValue(), (prev, raw) -> ema(prev, raw));
+        }
+        java.util.List<java.util.Map.Entry<String, Long>> ranked = new java.util.ArrayList<>(
+                drawEmaByName.entrySet());
+        ranked.sort((a, b2) -> Long.compare(b2.getValue(), a.getValue()));
+        String[] lines = new String[Math.min(3, ranked.size())];
+        for (int i = 0; i < lines.length; i++) {
+            lines[i] = ranked.get(i).getKey() + "\u00a77 (\u00a7f"
+                    + com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil
+                            .formatNumber(ranked.get(i).getValue())
+                    + "\u00a77 EU/t)";
+        }
+        topConsumers = lines;
+        if (!ranked.isEmpty()) {
+            topConsumerEUt = ranked.get(0).getValue();
+            topConsumerName = ranked.get(0).getKey();
+        } else {
+            topConsumerEUt = 0L;
+            topConsumerName = "";
+        }
+    }
+
+    /** Pre-formatted top-consumer line for the given rank, or "". */
+    public String getTopConsumerLine(int index) {
+        String[] lines = topConsumers;
+        return index < lines.length ? lines[index] : "";
+    }
+
+    /** Estimated cable loss (EU/t): generation minus delivered minus storage absorption. */
+    public long getLineLossEUt() {
+        return shownLineLossEUt;
+    }
+
+    private void alertNearbyPlayers(IGregTechTileEntity hostTile, long worldTime) {
+        String message = null;
+        if (shownStatus > lastAlertedStatus && shownStatus >= STATUS_ON_STORED
+                && worldTime - lastAlertTime >= ALERT_MIN_INTERVAL_TICKS) {
+            if (shownStatus >= STATUS_BROWNOUT) {
+                message = "\u00a76[Power Monitor] \u00a7c\u26a0 BROWNOUT -- demand exceeds supply!";
+            } else {
+                long eta = storedEtaSeconds;
+                message = "\u00a76[Power Monitor] \u00a76\u26a0 Running on stored EU -- brownout in "
+                        + (eta >= 0 ? "~" + PowerMonitorCover.formatSeconds(eta) : "soon") + ".";
+            }
+            lastAlertedStatus = shownStatus;
+            lastAlertTime = worldTime;
+        } else if (shownStatus <= STATUS_AT_CAPACITY && lastAlertedStatus >= STATUS_ON_STORED) {
+            message = "\u00a76[Power Monitor] \u00a72\u2714 Supply recovered.";
+            lastAlertedStatus = shownStatus;
+            lastAlertTime = worldTime;
+        }
+        if (message != null) {
+            broadcastNearby(hostTile, message);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void broadcastNearby(IGregTechTileEntity hostTile, String message) {
+        net.minecraft.world.World world = hostTile.getWorld();
+        if (world == null) {
+            return;
+        }
+        double x = hostTile.getXCoord() + 0.5;
+        double y = hostTile.getYCoord() + 0.5;
+        double z = hostTile.getZCoord() + 0.5;
+        for (Object p : world.playerEntities) {
+            net.minecraft.entity.player.EntityPlayer player = (net.minecraft.entity.player.EntityPlayer) p;
+            if (player.getDistanceSq(x, y, z) <= (double) ALERT_RADIUS * ALERT_RADIUS) {
+                player.addChatMessage(new net.minecraft.util.ChatComponentText(message));
             }
         }
-        long best = bestStandalone;
-        String bestName = bestStandaloneName;
-        for (java.util.Map.Entry<String, Long> e : ownerDraw.entrySet()) {
-            if (e.getValue() > best) {
-                best = e.getValue();
-                bestName = e.getKey();
-            }
-        }
-        topConsumerEUt = best;
-        topConsumerName = bestName;
     }
 
     /** 0=healthy, 1=at capacity, 2=running on stored EU, 3=brownout. Latched with hysteresis. */
@@ -352,6 +478,14 @@ public class PowerMonitorCoverBehavior {
     /** Seconds until storage exhausts at current drain (from buffer meters), or -1. */
     public long getStoredEtaSeconds() {
         return storedEtaSeconds;
+    }
+
+    /** EMA, alpha = 1/4 (~4 s time constant at 1 Hz). -1 = uninitialized; zero snaps immediately. */
+    private static long ema(long prev, long raw) {
+        if (prev < 0L || raw == 0L) {
+            return raw;
+        }
+        return prev + Math.round((raw - prev) / 4.0);
     }
 
     private static long applyDeadband(long displayed, long actual) {
@@ -399,10 +533,13 @@ public class PowerMonitorCoverBehavior {
      * stays true until the machine restarts, so entries are edge-detected
      * via loggedShutdowns.
      */
+    private String lastPowerLossAlert = null;
+
     private void trackControllerPowerLoss(NetworkDiscovery.MultiblockSummary multis, long worldTime) {
         for (NetworkDiscovery.ControllerState c : multis.controllers) {
             if (c.powerLossShutdown) {
                 if (loggedShutdowns.add(c.tileIdentity)) {
+                    lastPowerLossAlert = c.name; // picked up by onTick's host reference below
                     Outage o = new Outage();
                     o.startTime = worldTime;
                     o.endTime = worldTime; // instantaneous event: the machine is already dead
@@ -509,11 +646,11 @@ public class PowerMonitorCoverBehavior {
     }
 
     public long getLiveGenerationEUt() {
-        return liveGenerationEUt;
+        return shownGenerationEUt;
     }
 
     public long getLiveConsumptionEUt() {
-        return liveConsumptionEUt;
+        return shownConsumptionEUt;
     }
 
     public long getLiveNetEUt() {
@@ -579,21 +716,33 @@ public class PowerMonitorCoverBehavior {
      * time-projection accessors below.)
      */
     public long getSecondsToEmpty() {
-        long net = getLiveNetEUt();
-        if (net >= 0 || liveBufferedEU <= 0) {
+        long netFlow = emaBufferIn - emaBufferOut; // the buffers' own charge rate
+        if (netFlow >= -flowSignificanceFloor() || liveBufferedEU <= 0) {
             return -1;
         }
-        return liveBufferedEU / -net / TICKS_PER_SECOND;
+        return liveBufferedEU / -netFlow / TICKS_PER_SECOND;
+    }
+
+    /**
+     * Minimum |net flow| for a time estimate to mean anything: packet noise
+     * wobbles the buffer meters by an EU or two, and inside GT's own
+     * charge/decharge dead zone (batteries only charge above ~2/3 internal
+     * fill, discharge below ~1/3 -- verified against buffer source) tiny
+     * flows are the buffer idling by design. Extrapolating "+/-1 EU/t" into
+     * an hours-long forecast is noise dressed up as prophecy.
+     */
+    private long flowSignificanceFloor() {
+        return Math.max(4L, (emaBufferIn + emaBufferOut) / 50L); // 2% of gross traffic, min 4 EU/t
     }
 
     /** Seconds until buffer fills at current net surplus, or -1 if not charging / already full. */
     public long getSecondsToFull() {
-        long net = getLiveNetEUt();
+        long netFlow = emaBufferIn - emaBufferOut; // the buffers' own charge rate
         long remaining = liveBufferCapacityEU - liveBufferedEU;
-        if (net <= 0 || remaining <= 0) {
+        if (netFlow <= flowSignificanceFloor() || remaining <= 0) {
             return -1;
         }
-        return remaining / net / TICKS_PER_SECOND;
+        return remaining / netFlow / TICKS_PER_SECOND;
     }
 
     /** Seconds the fuel reserve lasts at the CURRENT generation rate, or -1 if unknowable (no gen / no fuel). */
@@ -660,7 +809,7 @@ public class PowerMonitorCoverBehavior {
     }
 
     public long getTopConsumerEUt() {
-        return topConsumerEUt;
+        return shownTopDrawEUt;
     }
 
     public String getTopConsumerName() {

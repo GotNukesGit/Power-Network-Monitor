@@ -114,6 +114,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue secFull = reg(syncManager, "pm_secfull", b::getSecondsToFull);
         LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getFuelReserveEU);
         LongSyncValue cable = reg(syncManager, "pm_cable", b::getAnchorThroughputEUt);
+        LongSyncValue lineLoss = reg(syncManager, "pm_lineloss", b::getLineLossEUt);
         LongSyncValue peakDemand = reg(syncManager, "pm_peakdemand", b::getPeakDemandEUt);
         LongSyncValue peakDrain = reg(syncManager, "pm_peakdrain", b::getPeakDeficitEUt);
         LongSyncValue genCount = reg(syncManager, "pm_gencount", b::getGeneratorCount);
@@ -126,7 +127,9 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue storedEta = reg(syncManager, "pm_storedeta", b::getStoredEtaSeconds);
         LongSyncValue truncated = reg(syncManager, "pm_trunc", () -> b.isNetworkLargerThanTierSupports() ? 1L : 0L);
 
-        StringSyncValue topName = regStr(syncManager, "pm_topname", b::getTopConsumerName);
+        StringSyncValue top0 = regStr(syncManager, "pm_top0", () -> b.getTopConsumerLine(0));
+        StringSyncValue top1 = regStr(syncManager, "pm_top1", () -> b.getTopConsumerLine(1));
+        StringSyncValue top2 = regStr(syncManager, "pm_top2", () -> b.getTopConsumerLine(2));
         StringSyncValue schedFull = regStr(syncManager, "pm_schedfull", b::getFuelScheduleFullBurn);
         StringSyncValue schedCur = regStr(syncManager, "pm_schedcur", b::getFuelScheduleCurrent);
         StringSyncValue deadBuffer = regStr(syncManager, "pm_deadbuf", b::getDeadBufferWarning);
@@ -134,7 +137,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         StringSyncValue outage1 = regStr(syncManager, "pm_outage1", () -> b.getOutageSummary(1));
 
         // ================= POWER =================
-        section(column, "POWER");
+        section(column, "POWER",
+                "\u00a7fEU/t\u00a77 = energy units per game tick (20 ticks = 1s).",
+                "\u00a7fDemand\u00a77: what running recipes want right now.",
+                "\u00a7fDelivered\u00a77: what machines actually received",
+                "\u00a77(always a bit less than generation -- cable loss).",
+                "\u00a7fCapacity\u00a77: rated maximums, not current output.");
 
         row(column, () -> {
             long d = demand.getLongValue();
@@ -174,10 +182,26 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return s;
         });
 
+        row(column, () -> {
+            long loss = lineLoss.getLongValue();
+            long g = gen.getLongValue();
+            if (loss <= 0 || g <= 0) {
+                return "";
+            }
+            long pct = 100L * loss / g;
+            String c = pct >= 10 ? "\u00a7e" : "\u00a7f";
+            return "\u00a77Line loss: " + c + "~" + fmt(loss) + " EU/t\u00a77 (" + c + pct + "%\u00a77)";
+        });
+
         divider(column);
 
         // ================= STORAGE =================
-        section(column, "STORAGE");
+        section(column, "STORAGE",
+                "\u00a77Battery buffers store EU in their \u00a7fbattery items\u00a77.",
+                "\u00a77Output rate = tier voltage \u00d7 battery count --",
+                "\u00a7fno batteries = dead output side\u00a77, a classic trap.",
+                "\u00a77Buffers idle between ~1/3 and ~2/3 internal charge",
+                "\u00a77by design, so small flows there are normal.");
 
         row(column, () -> {
             long cap = bufCap.getLongValue();
@@ -228,7 +252,11 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         divider(column);
 
         // ================= FUEL =================
-        section(column, "FUEL");
+        section(column, "FUEL",
+                "\u00a77Fuel sits in \u00a7feach generator's own tank/slot\u00a77 --",
+                "\u00a77not a shared pool. As each one runs dry, network",
+                "\u00a77capacity steps down: \u00a7f128\u21921h05m\u00a77 means \u00a7f128 EU/t",
+                "\u00a7funtil 1h05m\u00a77, then the next step takes over.");
 
         row(column, () -> {
             if (fuel.getLongValue() <= 0) {
@@ -250,7 +278,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         divider(column);
 
         // ================= NETWORK =================
-        section(column, "NETWORK");
+        section(column, "NETWORK",
+                "\u00a77Everything electrically connected through this cable,",
+                "\u00a77including across transformers and battery buffers.",
+                "\u00a7fLine loss\u00a77 scales with cable length and quality --",
+                "\u00a77shorter runs and better cables waste less EU.",
+                "\u00a7fPeak drain\u00a77: fastest the buffers have discharged.");
 
         row(column, () -> "\u00a7f" + genCount.getLongValue() + "\u00a77 gen \u00b7 \u00a7f"
                 + machCount.getLongValue() + "\u00a77 machines \u00b7 \u00a7f" + multiCountSync.getLongValue()
@@ -258,9 +291,16 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 + cables.getLongValue() + "\u00a77 cables");
 
         row(column, () -> {
-            long t = topEUt.getLongValue();
-            return t <= 0 ? "\u00a77Top draw: \u00a7fnone"
-                    : "\u00a77Top draw: \u00a7f" + topName.getStringValue() + "\u00a7r \u00a77(\u00a7f" + fmt(t) + "\u00a77 EU/t)";
+            String line = top0.getStringValue();
+            return line.isEmpty() ? "\u00a77Top draw: \u00a7fnone" : "\u00a77Top draw: \u00a7f" + line;
+        });
+        row(column, () -> {
+            String line = top1.getStringValue();
+            return line.isEmpty() ? "" : "\u00a77         \u00a7f" + line;
+        });
+        row(column, () -> {
+            String line = top2.getStringValue();
+            return line.isEmpty() ? "" : "\u00a77         \u00a7f" + line;
         });
 
         row(column, () -> "\u00a77This cable: \u00a7f" + fmt(cable.getLongValue()) + "\u00a77 EU/t max  Peak demand: \u00a7f"
@@ -318,8 +358,16 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
 
     // --- layout helpers ---
 
-    private void section(Flow column, String title) {
-        column.child(IKey.str("\u00a76\u00a7l" + title).asWidget().marginBottom(2));
+    private void section(Flow column, String title, String... tooltipLines) {
+        com.cleanroommc.modularui.widget.Widget<?> header = IKey.str("\u00a76\u00a7l" + title).asWidget();
+        if (tooltipLines.length > 0) {
+            header.tooltipStatic(t -> {
+                for (String line : tooltipLines) {
+                    t.addLine(line);
+                }
+            });
+        }
+        column.child(header.marginBottom(2));
     }
 
     private void row(Flow column, Supplier<String> text) {
