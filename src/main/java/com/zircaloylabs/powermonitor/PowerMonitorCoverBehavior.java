@@ -79,6 +79,12 @@ public class PowerMonitorCoverBehavior {
     private final java.util.HashMap<String, Long> drawEmaByName = new java.util.HashMap<>();
     private volatile String[] topConsumers = new String[0]; // pre-formatted display lines
 
+    // Diagnostic state for the sneak-screwdriver dump: last discovered
+    // member list + last sample's demand attribution.
+    private volatile java.util.List<gregtech.api.interfaces.tileentity.IBasicEnergyContainer> lastMembers = java.util.Collections
+            .emptyList();
+    private volatile java.util.List<String> lastDemandLines = java.util.Collections.emptyList();
+
     // Chat alerting: escalations to ON_STORED/BROWNOUT and named power-loss
     // events get announced to nearby players (the dashboard only helps if
     // you're looking at it). Rate-limited; a recovery message re-arms it.
@@ -326,6 +332,10 @@ public class PowerMonitorCoverBehavior {
         NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
                 discovery.members);
         rebuildMeterTaps(discovery.members, multis);
+        lastMembers = discovery.members;
+        java.util.List<String> dl = new java.util.ArrayList<>(snap.demandLines);
+        dl.addAll(multis.demandLines);
+        lastDemandLines = dl;
         int n = meterSampleCount;
         long rawConsumption = n > 0 ? accCons / n : snap.totalConsumptionEUt;
         long rawGeneration = n > 0 ? accGen / n : snap.totalGenerationEUt;
@@ -720,6 +730,58 @@ public class PowerMonitorCoverBehavior {
                 loggedShutdowns.remove(c.tileIdentity); // running again -- re-arm for the next incident
             }
         }
+    }
+
+    /**
+     * Full diagnostic dump for sneak-screwdriver: every member with
+     * classification, class name, and coordinates, then demand attribution.
+     * The panel showing its work -- disagreements between player and
+     * instrument get settled by reading this, not by arguing.
+     */
+    public java.util.List<String> buildDiagnostics() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        java.util.List<gregtech.api.interfaces.tileentity.IBasicEnergyContainer> members = lastMembers;
+        out.add("\u00a76-- Power Monitor diagnostics --");
+        out.add("\u00a77Members (" + members.size() + "):");
+        int shown = 0;
+        for (gregtech.api.interfaces.tileentity.IBasicEnergyContainer m : members) {
+            if (shown >= 32) {
+                out.add("\u00a78  ... and " + (members.size() - shown) + " more");
+                break;
+            }
+            String kind;
+            if (NetworkDiscovery.isTransformer(m)) {
+                kind = "xfmr";
+            } else if (NetworkDiscovery.isBatteryBuffer(m)) {
+                kind = "buffer";
+            } else if (m instanceof gregtech.api.interfaces.tileentity.IGregTechTileEntity
+                    && ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) m)
+                            .getMetaTileEntity() instanceof gregtech.api.metatileentity.implementations.MTEBasicGenerator) {
+                kind = "gen";
+            } else {
+                kind = "machine";
+            }
+            String cls = "?";
+            if (m instanceof gregtech.api.interfaces.tileentity.IGregTechTileEntity) {
+                gregtech.api.interfaces.metatileentity.IMetaTileEntity mte = ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) m)
+                        .getMetaTileEntity();
+                if (mte != null) {
+                    cls = mte.getClass().getSimpleName();
+                }
+            }
+            out.add("\u00a77  [" + kind + "] \u00a7f" + NetworkDiscovery.localNameOf(m) + "\u00a78 (" + cls + ") \u00a77@ "
+                    + NetworkDiscovery.coordsOf(m));
+            shown++;
+        }
+        java.util.List<String> dl = lastDemandLines;
+        out.add("\u00a77Demand contributors (" + dl.size() + "):");
+        if (dl.isEmpty()) {
+            out.add("\u00a78  none");
+        }
+        for (String line : dl) {
+            out.add("\u00a77  " + line);
+        }
+        return out;
     }
 
     public int getMultiblockCount() {

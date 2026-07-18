@@ -218,8 +218,22 @@ public final class NetworkDiscovery {
                 }
             } else if (beyondTe instanceof IBasicEnergyContainer) {
                 // Machine directly touching the relay's face (no cable in
-                // between) -- record it same as a normal terminal.
-                if (addMember(foundMembers, (IBasicEnergyContainer) beyondTe, maxTrackedNodes)) {
+                // between). Membership requires an ACTUAL energy connection
+                // across the touching faces -- one side must output where
+                // the other inputs, mirroring GT's own transfer condition.
+                // Without this, any machine merely PLACED beside a buffer or
+                // transformer got swept into the network (field-observed:
+                // census counting adjacent-but-unrelated tiles, whose frozen
+                // recipes then produced phantom demand).
+                IBasicEnergyContainer beyond = (IBasicEnergyContainer) beyondTe;
+                IBasicEnergyContainer relay = (IBasicEnergyContainer) relayTile;
+                ForgeDirection opposite = side.getOpposite();
+                boolean electrical = (relay.outputsEnergyTo(side) && beyond.inputEnergyFrom(opposite))
+                        || (beyond.outputsEnergyTo(opposite) && relay.inputEnergyFrom(side));
+                if (!electrical) {
+                    continue;
+                }
+                if (addMember(foundMembers, beyond, maxTrackedNodes)) {
                     return true;
                 }
             }
@@ -296,6 +310,9 @@ public final class NetworkDiscovery {
          */
         public long totalDemandEUt = 0L;
         public int demandMeteredCount = 0;
+
+        /** Human-readable demand attribution ("name @ x,y,z : N EU/t"), incl. excluded-disabled entries. */
+        public final List<String> demandLines = new ArrayList<>();
 
         /**
          * Max EU/t storage could push if fully charged: sum over battery
@@ -499,9 +516,30 @@ public final class NetworkDiscovery {
         }
         MTEBasicMachine machine = (MTEBasicMachine) mte;
         if (machine.mMaxProgresstime > 0 && machine.mEUt > 0 && machine.mEUt < Integer.MAX_VALUE - 1) {
-            snap.totalDemandEUt += machine.mEUt;
-            snap.demandMeteredCount++;
+            // Player-intent gate: the GUI power switch / soft mallet sets
+            // isAllowedToWork=false. A DISABLED machine with a recipe either
+            // finishes its current op (healthy) or hard-freezes (starved:
+            // stutter sets mProgresstime=-100, and the tick gate skips
+            // processing entirely -- verified GT 5.09.54.20 lines 575/601).
+            // Frozen-disabled machines accept one internal-buffer fill then
+            // refuse input, so their true network draw is ~0: counting them
+            // as demand manufactures phantom brownouts.
+            boolean allowed = !(container instanceof IMachineProgress)
+                    || ((IMachineProgress) container).isAllowedToWork();
+            String where = coordsOf(container);
+            if (allowed) {
+                snap.totalDemandEUt += machine.mEUt;
+                snap.demandMeteredCount++;
+                snap.demandLines.add(mte.getLocalName() + " @ " + where + " : " + machine.mEUt + " EU/t");
+            } else {
+                snap.demandLines
+                        .add(mte.getLocalName() + " @ " + where + " : " + machine.mEUt + " EU/t (disabled -- excluded)");
+            }
         }
+    }
+
+    public static String coordsOf(IBasicEnergyContainer container) {
+        return container.getXCoord() + "," + container.getYCoord() + "," + container.getZCoord();
     }
 
     // ==================== Multiblock resolution ====================
@@ -523,6 +561,7 @@ public final class NetworkDiscovery {
 
     public static final class MultiblockSummary {
         public long demandEUt = 0L;
+        public final List<String> demandLines = new ArrayList<>();
         public final List<ControllerState> controllers = new ArrayList<>();
         /** discovered hatch member -> owning controller name, for display attribution. */
         public final java.util.Map<IBasicEnergyContainer, String> hatchOwnerName = new java.util.IdentityHashMap<>();
@@ -602,8 +641,11 @@ public final class NetworkDiscovery {
                 continue; // controller not on our network
             }
 
+            Object base = controller.getBaseMetaTileEntity();
+            boolean controllerAllowed = !(base instanceof IMachineProgress)
+                    || ((IMachineProgress) base).isAllowedToWork();
             long demand = 0L;
-            if (controller.mMaxProgresstime > 0) {
+            if (controllerAllowed && controller.mMaxProgresstime > 0) {
                 if (controller instanceof MTEExtendedPowerMultiBlockBase) {
                     long lEUt = ((MTEExtendedPowerMultiBlockBase<?>) controller).lEUt;
                     if (lEUt < 0) {
@@ -614,9 +656,13 @@ public final class NetworkDiscovery {
                 }
             }
             summary.demandEUt += demand;
+            if (demand > 0) {
+                summary.demandLines.add(name + " : " + demand + " EU/t (multiblock)");
+            } else if (!controllerAllowed && controller.mMaxProgresstime > 0) {
+                summary.demandLines.add(name + " (multiblock, disabled -- excluded)");
+            }
 
             boolean powerLoss = false;
-            Object base = controller.getBaseMetaTileEntity();
             if (base instanceof IMachineProgress) {
                 IMachineProgress progress = (IMachineProgress) base;
                 powerLoss = progress.wasShutdown() && progress.getLastShutDownReason() != null
