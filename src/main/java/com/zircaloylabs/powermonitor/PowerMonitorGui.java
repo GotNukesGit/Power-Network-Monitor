@@ -216,9 +216,10 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             long line = loss - toll;
             long pct = 100L * loss / g;
             String c = pct >= 10 ? "\u00a7e" : "\u00a7f";
-            String s = "\u00a77Line loss: " + c + "~" + fmt(line) + " EU/t\u00a77";
+            long v = voltage.getLongValue();
+            String s = "\u00a77Line loss: " + c + "~" + fmt(line) + amps(line, v) + " EU/t\u00a77";
             if (toll > 0) {
-                s += " \u00b7 Output loss: " + c + "~" + fmt(toll) + " EU/t\u00a77";
+                s += " \u00b7 Output loss: " + c + "~" + fmt(toll) + amps(toll, v) + " EU/t\u00a77";
             }
             return s + " (" + c + pct + "%\u00a77)";
         });
@@ -241,7 +242,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             long batteries = bat.getLongValue();
             long batteriesCap = Math.max(1L, batCap.getLongValue());
             String s = "\u00a77Charge: \u00a7f" + fmt(batteries) + "\u00a7r / " + fmt(batteriesCap) + " EU batteries ("
-                    + (100L * batteries / batteriesCap) + "%) \u00a78int " + fmt(internal.getLongValue()) + "/"
+                    + (100L * batteries / batteriesCap) + "%) \u00a78tank " + fmt(internal.getLongValue()) + "/"
                     + fmt(internalCap.getLongValue());
             long e = secEmpty.getLongValue();
             long f = secFull.getLongValue();

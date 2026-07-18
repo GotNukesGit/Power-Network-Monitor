@@ -43,6 +43,7 @@ public class PowerMonitorCoverBehavior {
     private double emaTotalChargeSlope = 0.0; // EU/t
     private double emaBatterySlope = 0.0; // EU/t
     private long liveRelayTollEUt = 0L;
+    private volatile java.util.Map<String, Long> liveInMachineFuelMb = java.util.Collections.emptyMap();
     private boolean lastDiscoveryTruncated = false;
     private int lastCablesVisited = 0; // diagnostic, shown in chat readout while chasing the discovery bug
 
@@ -131,6 +132,18 @@ public class PowerMonitorCoverBehavior {
      */
     private static final int WARMUP_SAMPLES = 10;
     private int warmupSamplesRemaining = WARMUP_SAMPLES;
+    // Adaptive warmup extension: chunk loading materializes a network's
+    // tiles over several seconds in arbitrary order -- machines can exist
+    // and demand while their generators haven't loaded yet, which reads as
+    // a total outage. A fixed warmup window loses that race on slow loads,
+    // so warmup also holds until the member census has been STABLE for a
+    // few consecutive samples (hard-capped so a genuinely changing network
+    // can't pin us in warmup forever).
+    private int lastWarmupMemberCount = -1;
+    private int censusStableStreak = 0;
+    private int warmupExtensionUsed = 0;
+    private static final int CENSUS_STABLE_SAMPLES = 3;
+    private static final int WARMUP_EXTENSION_CAP = 35;
     private boolean warmingUp = true;
     private long lastAlertTime = -ALERT_MIN_INTERVAL_TICKS;
     private long shownDemandEUt = 0L;
@@ -342,9 +355,19 @@ public class PowerMonitorCoverBehavior {
             return;
         }
         lastSampleWorldTime = worldTime;
-        warmingUp = warmupSamplesRemaining > 0;
-        if (warmingUp) {
+        int memberCountNow = meterTaps.size();
+        if (memberCountNow == lastWarmupMemberCount) {
+            censusStableStreak++;
+        } else {
+            censusStableStreak = 0;
+        }
+        lastWarmupMemberCount = memberCountNow;
+        boolean settling = censusStableStreak < CENSUS_STABLE_SAMPLES && warmupExtensionUsed < WARMUP_EXTENSION_CAP;
+        warmingUp = warmupSamplesRemaining > 0 || settling;
+        if (warmupSamplesRemaining > 0) {
             warmupSamplesRemaining--;
+        } else if (settling) {
+            warmupExtensionUsed++;
         }
 
         // Voltage rating comes from MTECable's own public mVoltage field, NOT
@@ -376,6 +399,33 @@ public class PowerMonitorCoverBehavior {
         lastCablesVisited = discovery.cablesVisited;
 
         NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
+        // Unify multi-hatch supply plants: a multiblock fed by hatches on
+        // SEPARATE lines is one machine with one demand. After resolving
+        // controllers, seed the walk from any of their hatches the BFS
+        // never reached, and re-resolve -- iterated to a fixpoint (capped)
+        // because a newly unified line can reveal further multiblocks.
+        for (int round = 0; round < 3; round++) {
+            NetworkDiscovery.MultiblockSummary probe = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
+                    discovery.members);
+            boolean grew = false;
+            java.util.HashSet<Object> memberSet = new java.util.HashSet<>(discovery.members);
+            for (NetworkDiscovery.ControllerState state : probe.controllers) {
+                for (gregtech.api.metatileentity.implementations.MTEHatchEnergy hatch : state.controller.mEnergyHatches) {
+                    if (hatch == null) {
+                        continue;
+                    }
+                    Object base = hatch.getBaseMetaTileEntity();
+                    if (base instanceof gregtech.api.interfaces.tileentity.IGregTechTileEntity
+                            && !memberSet.contains(base)) {
+                        grew |= NetworkDiscovery.expandFromHatch(discovery,
+                                (gregtech.api.interfaces.tileentity.IGregTechTileEntity) base, tier.maxTrackedNodes);
+                    }
+                }
+            }
+            if (!grew) {
+                break;
+            }
+        }
         NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
                 discovery.members);
         rebuildMeterTaps(discovery.members, multis);
@@ -401,6 +451,7 @@ public class PowerMonitorCoverBehavior {
         liveBufferNetChargeEUt = snap.bufferNetChargeEUt;
         liveInternalEU = snap.internalBufferEU;
         liveRelayTollEUt = snap.relayOutputTollEUt;
+        liveInMachineFuelMb = snap.inMachineFuelMb;
         liveInternalCapEU = snap.internalBufferCapacityEU;
         long batteryNow = Math.max(0L, liveBufferedEU - liveInternalEU);
         if (lastTotalCharge >= 0) {
@@ -821,20 +872,36 @@ public class PowerMonitorCoverBehavior {
                 scan.litersByFluid.entrySet());
         ranked.sort((a, b2) -> Long.compare(b2.getValue(), a.getValue()));
 
+        // Union of connected-tank fluids and in-machine fuel: the same fluid
+        // often lives in both places, and showing only one denomination was
+        // field-confirmed confusing (a reserve row showing a NEIGHBOR's
+        // leaked diesel while the player's own engine-tank diesel sat one
+        // section up, denominated in EU).
+        java.util.Map<String, Long> inMachines = liveInMachineFuelMb;
+        java.util.LinkedHashMap<String, Long> connected = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : ranked) {
+            connected.put(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1).getLocalizedName(), e.getValue());
+        }
+        java.util.LinkedHashSet<String> allFluids = new java.util.LinkedHashSet<>(connected.keySet());
+        allFluids.addAll(inMachines.keySet());
+        java.util.List<String> order = new java.util.ArrayList<>(allFluids);
+        order.sort((a, b2) -> Long.compare(
+                connected.getOrDefault(b2, 0L) + inMachines.getOrDefault(b2, 0L),
+                connected.getOrDefault(a, 0L) + inMachines.getOrDefault(a, 0L)));
         java.util.HashSet<String> seen = new java.util.HashSet<>();
         java.util.List<String> lines = new java.util.ArrayList<>();
-        for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : ranked) {
-            String name = new net.minecraftforge.fluids.FluidStack(e.getKey(), 1).getLocalizedName();
-            long liters = e.getValue();
+        for (String name : order) {
+            long conn = connected.getOrDefault(name, 0L);
+            long mach = inMachines.getOrDefault(name, 0L);
             seen.add(name);
-            double[] track = reserveTracks.computeIfAbsent(name, k -> new double[] { liters, 0.0 });
+            double[] track = reserveTracks.computeIfAbsent(name, k -> new double[] { conn, 0.0 });
             if (dtSeconds > 0) {
-                double slope = (liters - track[0]) / dtSeconds; // L/s, signed
+                double slope = (conn - track[0]) / dtSeconds; // connected tanks only -- machine tanks cycle by design
                 track[1] = track[1] == 0.0 ? slope : track[1] + (slope - track[1]) / 4.0;
             }
-            track[0] = liters;
+            track[0] = conn;
             if (lines.size() < 3) {
-                lines.add(formatReserveLine(name, liters, track[1]));
+                lines.add(formatReserveLine(name, conn, mach, track[1]));
             }
         }
         reserveTracks.keySet().retainAll(seen); // vanished fluids drop their tracks
@@ -844,20 +911,33 @@ public class PowerMonitorCoverBehavior {
         reserveLines = lines.toArray(new String[0]);
     }
 
-    private static String formatReserveLine(String name, long liters, double slope) {
-        String base = "\u00a77" + name + ": \u00a7f"
-                + com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(liters) + " L\u00a77 \u00b7 ";
-        // Significance floor mirrors the storage-flow rule: a couple L/s of
-        // packet-y wobble is idle, not a forecast.
-        double floor = Math.max(1.0, liters / 50000.0);
-        if (slope > floor) {
-            return base + "\u00a7a+" + Math.round(slope) + " L/s charging";
+    private static String formatReserveLine(String name, long connectedL, long inMachineL, double slope) {
+        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(": ");
+        if (connectedL > 0) {
+            sb.append("\u00a7f")
+                    .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(connectedL))
+                    .append(" L\u00a77 connected");
         }
-        if (slope < -floor) {
-            long eta = (long) (liters / -slope);
-            return base + "\u00a7c" + Math.round(slope) + " L/s \u00b7 ~" + PowerMonitorCover.formatSeconds(eta);
+        if (inMachineL > 0) {
+            if (connectedL > 0) {
+                sb.append(" \u00b7 ");
+            }
+            sb.append("\u00a7f")
+                    .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(inMachineL))
+                    .append(" L\u00a77 in machines");
         }
-        return base + "\u00a7fsteady";
+        // Trend applies to CONNECTED tanks only (machine tanks cycle by design).
+        double floor = Math.max(1.0, connectedL / 50000.0);
+        if (connectedL > 0) {
+            if (slope > floor) {
+                sb.append(" \u00b7 \u00a7a+").append(Math.round(slope)).append(" L/s");
+            } else if (slope < -floor) {
+                long eta = (long) (connectedL / -slope);
+                sb.append(" \u00b7 \u00a7c").append(Math.round(slope)).append(" L/s ~")
+                        .append(PowerMonitorCover.formatSeconds(eta));
+            }
+        }
+        return sb.toString();
     }
 
     /** Connected-reserve display line for the given rank, or "". */

@@ -71,6 +71,17 @@ public final class NetworkDiscovery {
         public final List<IBasicEnergyContainer> members = new ArrayList<>();
         public boolean truncated = false; // hit maxTrackedNodes before finishing
         public int cablesVisited = 0; // diagnostic: how much of the network the BFS actually walked
+        public int supplyLines = 1; // 1 + number of foreign-hatch expansions (multi with N hatches on N lines)
+
+        // Walk context retained so the network can be EXPANDED after
+        // multiblock resolution: a multi fed by several energy hatches on
+        // separate supply lines is one machine with one demand -- booking
+        // its whole demand against the one line the anchor sees makes
+        // demand vs supply incoherent. expandFromHatch() re-enters the same
+        // BFS from a foreign hatch, unifying the multi's entire supply
+        // plant into one network view.
+        final Set<IGregTechTileEntity> visited = new HashSet<>();
+        final Set<IBasicEnergyContainer> foundMembers = new HashSet<>();
     }
 
     /**
@@ -86,14 +97,43 @@ public final class NetworkDiscovery {
             return result; // not attached to a cable, nothing to walk
         }
 
-        Set<IGregTechTileEntity> visited = new HashSet<>(); // cables AND relays
-        Set<IBasicEnergyContainer> foundMembers = new HashSet<>();
+        result.visited.add(anchorTile);
+        runWalk(result, anchorTile, maxTrackedNodes);
+        syncMembers(result);
+        return result;
+    }
+
+    /**
+     * Re-enter the walk from a multiblock's energy hatch that the initial
+     * BFS never reached -- i.e., a hatch fed by a physically separate
+     * supply line. The hatch joins as a member and its adjacent network is
+     * walked with the SAME visited/member state, so repeated expansions
+     * converge. Returns true if anything new was discovered.
+     */
+    public static boolean expandFromHatch(Result result, IGregTechTileEntity hatchTile, int maxTrackedNodes) {
+        if (hatchTile == null || !result.visited.add(hatchTile)) {
+            return false;
+        }
+        int before = result.foundMembers.size();
+        if (hatchTile instanceof IBasicEnergyContainer) {
+            result.foundMembers.add((IBasicEnergyContainer) hatchTile);
+        }
+        // Walk outward from every face of the hatch: cables chain the BFS,
+        // relays chain and join, machines join with the standard checks --
+        // exactly the relay-side rules, which is what a hatch is topologically.
+        runWalk(result, hatchTile, maxTrackedNodes);
+        boolean grew = result.foundMembers.size() > before;
+        if (grew) {
+            result.supplyLines++;
+        }
+        syncMembers(result);
+        return grew;
+    }
+
+    private static void runWalk(Result result, IGregTechTileEntity seed, int maxTrackedNodes) {
         ArrayDeque<IGregTechTileEntity> queue = new ArrayDeque<>();
-
-        visited.add(anchorTile);
-        queue.add(anchorTile);
-
-        boolean truncated = false;
+        queue.add(seed);
+        boolean truncated = result.truncated;
 
         while (!queue.isEmpty() && !truncated) {
             IGregTechTileEntity current = queue.poll();
@@ -101,17 +141,20 @@ public final class NetworkDiscovery {
 
             if (currentMte instanceof MTECable) {
                 result.cablesVisited++;
-                truncated = walkCableSides(current, (MTECable) currentMte, visited, foundMembers, queue,
+                truncated = walkCableSides(current, (MTECable) currentMte, result.visited, result.foundMembers, queue,
                         maxTrackedNodes);
             } else {
-                // Relay node (transformer or battery buffer): walk all faces.
-                truncated = walkRelaySides(current, visited, foundMembers, queue, maxTrackedNodes);
+                // Relay node (transformer, battery buffer, or expansion seed
+                // hatch): walk all faces.
+                truncated = walkRelaySides(current, result.visited, result.foundMembers, queue, maxTrackedNodes);
             }
         }
-
         result.truncated = truncated;
-        result.members.addAll(foundMembers);
-        return result;
+    }
+
+    private static void syncMembers(Result result) {
+        result.members.clear();
+        result.members.addAll(result.foundMembers);
     }
 
     private static boolean walkCableSides(
@@ -292,6 +335,9 @@ public final class NetworkDiscovery {
 
         /** Emission toll paid by fuel-less relays (buffers + transformers) -- real network loss. */
         public long relayOutputTollEUt = 0L;
+
+        /** Liters of fuel sitting INSIDE member generators, per fluid display name. */
+        public final java.util.Map<String, Long> inMachineFuelMb = new java.util.LinkedHashMap<>();
 
         /** Net storage flow: sum over buffers of (avgIn - avgOut). >0 charging, <0 discharging. */
         public long bufferNetChargeEUt = 0L;
@@ -502,6 +548,7 @@ public final class NetworkDiscovery {
         if (tankFluid != null && tankFluid.amount > 0) {
             long euPerOp = gen.getFuelValue(tankFluid, true);
             if (euPerOp > 0) {
+                snap.inMachineFuelMb.merge(tankFluid.getLocalizedName(), (long) tankFluid.amount, Long::sum);
                 long perOpMb = Math.max(1, gen.consumedFluidPerOperation(tankFluid));
                 fuelEU += (tankFluid.amount / perOpMb) * euPerOp;
             }
@@ -597,12 +644,16 @@ public final class NetworkDiscovery {
         public final String name;
         public final long demandEUt; // actual usage while running, 0 otherwise
         public final boolean powerLossShutdown;
+        /** Retained (per-pass, transient) so hatch-expansion can reach the controller's full hatch list. */
+        public final MTEMultiBlockBase controller;
 
-        ControllerState(Object tileIdentity, String name, long demandEUt, boolean powerLossShutdown) {
+        ControllerState(Object tileIdentity, String name, long demandEUt, boolean powerLossShutdown,
+                MTEMultiBlockBase controller) {
             this.tileIdentity = tileIdentity;
             this.name = name;
             this.demandEUt = demandEUt;
             this.powerLossShutdown = powerLossShutdown;
+            this.controller = controller;
         }
     }
 
@@ -715,7 +766,7 @@ public final class NetworkDiscovery {
                 powerLoss = progress.wasShutdown() && progress.getLastShutDownReason() != null
                         && "power_loss".equals(progress.getLastShutDownReason().getID());
             }
-            summary.controllers.add(new ControllerState(base, name, demand, powerLoss));
+            summary.controllers.add(new ControllerState(base, name, demand, powerLoss, controller));
         }
         return summary;
     }

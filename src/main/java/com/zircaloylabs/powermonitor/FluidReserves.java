@@ -147,6 +147,20 @@ public final class FluidReserves {
         if (!(te instanceof IFluidHandler) || memberSet.contains(te) || !countedTanks.add(te)) {
             return;
         }
+        // FOREIGN MACHINES ARE NOT TANKS. A generator or processing machine
+        // belonging to some OTHER network is also an IFluidHandler -- its
+        // internal fuel/recipe fluid is its own, not our reserve.
+        // Field-observed: two combustion engines touching caused each
+        // monitor to count the NEIGHBOR's diesel. Real tanks (GT drums,
+        // super/quantum tanks, Railcraft) don't descend from these classes.
+        if (te instanceof IGregTechTileEntity) {
+            IMetaTileEntity mte = ((IGregTechTileEntity) te).getMetaTileEntity();
+            if (mte instanceof MTEBasicGenerator
+                    || mte instanceof gregtech.api.metatileentity.implementations.MTEBasicMachine
+                    || mte instanceof gregtech.api.metatileentity.implementations.MTEMultiBlockBase) {
+                return;
+            }
+        }
         FluidTankInfo[] tanks = ((IFluidHandler) te).getTankInfo(querySide);
         if (tanks == null) {
             return;
