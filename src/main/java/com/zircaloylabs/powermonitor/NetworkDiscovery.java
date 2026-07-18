@@ -208,7 +208,9 @@ public final class NetworkDiscovery {
                     queue.add(beyondGt);
                 }
             } else if (isRelay(beyondMte)) {
-                if (beyondMte instanceof MTEBasicBatteryBuffer && beyondTe instanceof IBasicEnergyContainer) {
+                // Same as the cable-walk site: relays are members (classified
+                // and metering-excluded in summarize) AND traversal nodes.
+                if (beyondTe instanceof IBasicEnergyContainer) {
                     if (addMember(foundMembers, (IBasicEnergyContainer) beyondTe, maxTrackedNodes)) {
                         return true;
                     }

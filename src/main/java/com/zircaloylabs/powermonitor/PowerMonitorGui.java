@@ -7,6 +7,7 @@ import com.cleanroommc.modularui.value.sync.LongSyncValue;
 import com.cleanroommc.modularui.value.sync.PanelSyncManager;
 import com.cleanroommc.modularui.value.sync.InteractionSyncHandler;
 import com.cleanroommc.modularui.value.sync.StringSyncValue;
+import com.cleanroommc.modularui.widget.ParentWidget;
 import com.cleanroommc.modularui.widgets.ButtonWidget;
 import com.cleanroommc.modularui.drawable.ItemDrawable;
 import com.cleanroommc.modularui.screen.ModularPanel;
@@ -23,7 +24,6 @@ import com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil;
 
 import net.minecraft.network.PacketBuffer;
 
-import java.text.DecimalFormat;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -61,7 +61,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
     private static final int CHART_WIDTH = 96;
     private static final int CHART_HEIGHT = 40;
     private static final int CHART_GAP = 6;
-    private static final int CONTENT_WIDTH = CHART_WIDTH * 2 + CHART_GAP;
+    private static final int CONTENT_WIDTH = (CHART_WIDTH + 54) * 2 + CHART_GAP; // plot + live-value gutter, x2
     private static final int DIVIDER_COLOR = 0x38FFFFFF; // subtle light rule on the dark panel
     private static final int PANEL_BG = 0xF60D0F12; // near-black, slightly translucent
     private static final int CHART_BG = 0xFF10141A; // dark navy plot area, overrides the theme's purple
@@ -350,16 +350,37 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             String o = outage1.getStringValue();
             return o.isEmpty() ? "" : "\u00a7cOutage: " + o;
         });
-        column.child(new ButtonWidget<>()
-                .overlay(IKey.str("\u00a7fack"))
-                .size(28, 11)
-                .tooltipStatic(t -> t.addLine("\u00a77Acknowledge outages (clears the log)"))
-                .syncHandler(new InteractionSyncHandler().setOnMousePressed(mouseData -> {
-                    if (!mouseData.isClient()) {
-                        b.acknowledgeOutages();
-                    }
-                }))
-                .setEnabledIf(w -> !outage0.getStringValue().isEmpty())
+        // Ack (clears outage log) + diag (prints the full member/demand dump
+        // to chat). Diag lives HERE, not only on sneak-screwdriver: vanilla
+        // 1.7.10 skips block activation when sneaking with an item in hand
+        // unless the item opts out, so the sneak gesture's delivery depends
+        // on GT tool internals -- a GUI button cannot be eaten by vanilla
+        // sneak semantics.
+        final net.minecraft.entity.player.EntityPlayer guiPlayer = data.getPlayer();
+        column.child(Flow.row().coverChildren()
+                .child(new ButtonWidget<>()
+                        .overlay(IKey.str("\u00a7fack"))
+                        .size(28, 11)
+                        .tooltipStatic(t -> t.addLine("\u00a77Acknowledge outages (clears the log)"))
+                        .syncHandler(new InteractionSyncHandler().setOnMousePressed(mouseData -> {
+                            if (!mouseData.isClient()) {
+                                b.acknowledgeOutages();
+                            }
+                        }))
+                        .setEnabledIf(w -> !outage0.getStringValue().isEmpty())
+                        .marginRight(4))
+                .child(new ButtonWidget<>()
+                        .overlay(IKey.str("\u00a7fdiag"))
+                        .size(30, 11)
+                        .tooltipStatic(t -> t.addLine("\u00a77Print network diagnostics to chat")
+                                .addLine("\u00a78(every member + demand source, with coordinates)"))
+                        .syncHandler(new InteractionSyncHandler().setOnMousePressed(mouseData -> {
+                            if (!mouseData.isClient() && guiPlayer != null) {
+                                for (String line : b.buildDiagnostics()) {
+                                    guiPlayer.addChatMessage(new net.minecraft.util.ChatComponentText(line));
+                                }
+                            }
+                        })))
                 .marginBottom(2));
 
         divider(column);
@@ -372,12 +393,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         }
 
         column.child(Flow.row().coverChildren()
-                .child(chartColumn("Demand (EU/t)", b::getChartDemand, " EU/t").marginRight(CHART_GAP))
-                .child(chartColumn("Generation (EU/t)", b::getChartGeneration, " EU/t"))
+                .child(chartCell("Demand (EU/t)", b::getChartDemand, demand).marginRight(CHART_GAP))
+                .child(chartCell("Generation (EU/t)", b::getChartGeneration, gen))
                 .marginBottom(4));
         column.child(Flow.row().coverChildren()
-                .child(chartColumn("Storage (EU)", b::getChartBuffered, " EU").marginRight(CHART_GAP))
-                .child(chartColumn("Fuel reserve (EU)", b::getChartFuel, " EU")));
+                .child(chartCell("Storage (EU)", b::getChartBuffered, buf).marginRight(CHART_GAP))
+                .child(chartCell("Fuel reserve (EU)", b::getChartFuel, fuel)));
     }
 
     // --- layout helpers ---
@@ -403,33 +424,56 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 .marginTop(1).marginBottom(3));
     }
 
-    private Flow chartColumn(String label, Supplier<List<Double>> series, String unit) {
-        return Flow.column().coverChildren()
-                .child(IKey.str("\u00a7f" + label).asWidget().marginBottom(1))
-                .child(makeChart(series, unit));
-    }
-
-    private LineChartWidget makeChart(Supplier<List<Double>> series, String unit) {
-        // Sync-handler construction copied from GT's Tesla Tower chart; the
-        // null slots are the client->server setter (read-only chart) and the
-        // deserializer hook we don't need. TESLA_TOWER_CHART is GT's
-        // purpose-built electricity-chart theme: bright green line,
-        // near-white min/max labels on a dark plot background.
-        return new LineChartWidget()
-                .syncHandler(new GenericListSyncHandler<>(
-                        series,
-                        null,
-                        PacketBuffer::readDouble,
-                        PacketBuffer::writeDouble,
-                        Double::equals,
-                        null))
+    /**
+     * One chart cell: title (states the unit ONCE), plot with our own axis
+     * labels, and a live value to the right.
+     *
+     * The widget's built-in min/max text is disabled (renderMinMaxText
+     * false) because it string-concatenates the raw double with the unit --
+     * its formatter field is never applied to that text (verified in GT
+     * source, line 239: renderer.draw(maxValue + chartUnit)), which is where
+     * "5.30739E7 EU" came from. We overlay our own: axis bounds in dim gray
+     * (clearly secondary, can't be mistaken for a live reading), unit-free
+     * since the title already said it; the LIVE value sits to the right of
+     * the plot in bright white.
+     */
+    private Flow chartCell(String title, Supplier<List<Double>> series, LongSyncValue realtime) {
+        GenericListSyncHandler<Double> handler = new GenericListSyncHandler<>(
+                series, null, PacketBuffer::readDouble, PacketBuffer::writeDouble, Double::equals, null);
+        LineChartWidget chart = new LineChartWidget()
+                .syncHandler(handler)
                 .widgetTheme(GTWidgetThemes.TESLA_TOWER_CHART)
                 .background(new Rectangle().color(CHART_BG)) // explicit bg wins over the theme's purple
                 .lowerBoundAlwaysZero()
                 .lineWidth(2)
-                .chartUnit(unit)
-                .formatter(new DecimalFormat("#,##0"))
+                .renderMinMaxText(false)
                 .size(CHART_WIDTH, CHART_HEIGHT);
+        ParentWidget<?> plot = new ParentWidget<>()
+                .size(CHART_WIDTH, CHART_HEIGHT)
+                .child(chart)
+                .child(IKey.dynamic(() -> "\u00a78" + fmt(seriesMax(handler))).asWidget().top(1).left(2))
+                .child(IKey.str("\u00a780").asWidget().bottom(1).left(2));
+        return Flow.column().coverChildren()
+                .child(IKey.str("\u00a7f" + title).asWidget().marginBottom(1))
+                .child(Flow.row().coverChildren()
+                        .child(plot)
+                        .child(IKey.dynamic(() -> "\u00a7f" + fmt(realtime.getLongValue())).asWidget()
+                                .marginLeft(4).verticalCenter()));
+    }
+
+    /** Max of the synced series (the chart's effective upper axis bound with lowerBoundAlwaysZero). */
+    private static long seriesMax(GenericListSyncHandler<Double> handler) {
+        List<Double> list = handler.getValue();
+        if (list == null || list.isEmpty()) {
+            return 0L;
+        }
+        double max = 0;
+        for (Double d : list) {
+            if (d != null && d > max) {
+                max = d;
+            }
+        }
+        return Math.round(max);
     }
 
     private LongSyncValue reg(PanelSyncManager syncManager, String name, java.util.function.LongSupplier getter) {
