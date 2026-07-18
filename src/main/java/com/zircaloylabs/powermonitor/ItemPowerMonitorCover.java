@@ -95,7 +95,11 @@ public class ItemPowerMonitorCover extends Item {
 
     @Override
     public void getSubItems(Item item, CreativeTabs tab, List list) {
-        for (PowerMonitorTier tier : PowerMonitorTier.values()) {
+        // Creative tab / NEI listing: enabled tiers only. Damage-based
+        // lookups (icons, tierOf) intentionally keep the FULL range so any
+        // higher-tier item that already exists in a world still renders and
+        // resolves rather than crashing.
+        for (PowerMonitorTier tier : PowerMonitorTier.enabledTiers()) {
             list.add(itemStack(tier));
         }
     }

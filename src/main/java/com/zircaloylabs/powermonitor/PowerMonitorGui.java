@@ -124,6 +124,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue bufCount = reg(syncManager, "pm_bufcount", b::getBufferCount);
         LongSyncValue cables = reg(syncManager, "pm_cables", b::getLastCablesVisited);
         LongSyncValue multiCountSync = reg(syncManager, "pm_multis", b::getMultiblockCount);
+        LongSyncValue xfmrCount = reg(syncManager, "pm_xfmr", b::getTransformerCount);
         LongSyncValue topEUt = reg(syncManager, "pm_topeut", b::getTopConsumerEUt);
         LongSyncValue status = reg(syncManager, "pm_status", b::getSupplyStatus);
         LongSyncValue storedEta = reg(syncManager, "pm_storedeta", b::getStoredEtaSeconds);
@@ -285,10 +286,16 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 "\u00a77shorter runs and better cables waste less EU.",
                 "\u00a7fPeak drain\u00a77: fastest the buffers have discharged.");
 
-        row(column, () -> "\u00a7f" + genCount.getLongValue() + "\u00a77 gen \u00b7 \u00a7f"
-                + machCount.getLongValue() + "\u00a77 machines \u00b7 \u00a7f" + multiCountSync.getLongValue()
-                + "\u00a77 multis \u00b7 \u00a7f" + bufCount.getLongValue() + "\u00a77 buffers \u00b7 \u00a7f"
-                + cables.getLongValue() + "\u00a77 cables");
+        row(column, () -> {
+            String s = "\u00a7f" + genCount.getLongValue() + "\u00a77 gen \u00b7 \u00a7f"
+                    + machCount.getLongValue() + "\u00a77 machines \u00b7 \u00a7f" + multiCountSync.getLongValue()
+                    + "\u00a77 multis \u00b7 \u00a7f" + bufCount.getLongValue() + "\u00a77 buffers";
+            long x = xfmrCount.getLongValue();
+            if (x > 0) {
+                s += " \u00b7 \u00a7f" + x + "\u00a77 xfmr";
+            }
+            return s + " \u00b7 \u00a7f" + cables.getLongValue() + "\u00a77 cables";
+        });
 
         row(column, () -> {
             String line = top0.getStringValue();

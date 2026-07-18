@@ -46,7 +46,9 @@ public class ModPowerMonitorRegistration {
         coverItem = new ItemPowerMonitorCover();
         GameRegistry.registerItem(coverItem, "powermonitor_cover");
 
-        for (PowerMonitorTier tier : PowerMonitorTier.values()) {
+        // Public release: registers ULV/LV/MV only -- see
+        // PowerMonitorTier.enabledTiers() for the re-enable point.
+        for (PowerMonitorTier tier : PowerMonitorTier.enabledTiers()) {
             registerTier(tier);
         }
     }

@@ -131,9 +131,16 @@ public final class NetworkDiscovery {
             IMetaTileEntity neighborMte = neighborGt.getMetaTileEntity();
 
             if (neighborMte instanceof MTECable) {
-                // Cable-to-cable: keep GT's real material/insulation/color
-                // matching via getConnectableMTE -- this check is correct here.
-                if (currentCable.getConnectableMTE(side) == null) {
+                // Walk by GT's LIVE connection state (mConnections bitmask),
+                // not getConnectableMTE: that helper governs whether a NEW
+                // join may FORM (same material + insulation + color), but GT
+                // routes power by the formed-connection state, which happily
+                // spans mixed materials and respects wire-cutter snips and
+                // soldered joins. Field-verified: a lossless-to-Tin junction
+                // conducted in game while the forming-rule check stopped the
+                // walk -- hiding half a base from the monitor.
+                MTECable neighborCable = (MTECable) neighborMte;
+                if (!currentCable.isConnectedAtSide(side) || !neighborCable.isConnectedAtSide(side.getOpposite())) {
                     continue;
                 }
                 if (visited.add(neighborGt)) {
@@ -301,6 +308,7 @@ public final class NetworkDiscovery {
         public int generatorCount = 0; // single-block generators (MTEBasicGenerator)
         public int machineCount = 0; // non-buffer, non-generator members
         public int bufferCount = 0;
+        public int transformerCount = 0;
 
         /** Highest average draw among non-buffer members, for "top consumer" display. */
         public long topConsumerEUt = 0L;
@@ -344,6 +352,18 @@ public final class NetworkDiscovery {
             if (isBatteryBuffer(container)) {
                 snap.bufferCount++;
                 accumulateBuffer(snap, container);
+                continue;
+            }
+
+            // Transformers are RELAYS, not machines: their input meter reads
+            // the whole downstream network's power arriving, their output
+            // meter reads it all leaving. Metering them as members counts
+            // every EU twice -- generation and delivered both read ~2x real
+            // and the transformer wins Top draw. Conversion itself is 1:1
+            // in GT (loss lives in cables), so excluding them entirely
+            // keeps the energy balance exact.
+            if (isTransformer(container)) {
+                snap.transformerCount++;
                 continue;
             }
 
@@ -636,6 +656,13 @@ public final class NetworkDiscovery {
      * IGregTechTileEntity -- so we go through getMetaTileEntity() to reach
      * the logic class these instanceof checks need.
      */
+    public static boolean isTransformer(IBasicEnergyContainer container) {
+        if (!(container instanceof IGregTechTileEntity)) {
+            return false;
+        }
+        return ((IGregTechTileEntity) container).getMetaTileEntity() instanceof MTETransformer;
+    }
+
     public static boolean isBatteryBuffer(IBasicEnergyContainer container) {
         if (!(container instanceof IGregTechTileEntity)) {
             return false;

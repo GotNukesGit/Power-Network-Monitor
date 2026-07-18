@@ -157,6 +157,7 @@ public class PowerMonitorCoverBehavior {
     private int generatorCount = 0;
     private int machineCount = 0;
     private int bufferCount = 0;
+    private int transformerCount = 0;
     private long topConsumerEUt = 0L;
     private String topConsumerName = "";
     private boolean supplySaturated = false;
@@ -238,6 +239,9 @@ public class PowerMonitorCoverBehavior {
             NetworkDiscovery.MultiblockSummary multis) {
         java.util.List<MeterTap> taps = new java.util.ArrayList<>(members.size());
         for (gregtech.api.interfaces.tileentity.IBasicEnergyContainer member : members) {
+            if (NetworkDiscovery.isTransformer(member)) {
+                continue; // relay, not a machine -- see NetworkDiscovery#summarize
+            }
             boolean buffer = NetworkDiscovery.isBatteryBuffer(member);
             boolean generator = false;
             String name = "";
@@ -351,6 +355,7 @@ public class PowerMonitorCoverBehavior {
         generatorCount = snap.generatorCount;
         machineCount = snap.machineCount;
         bufferCount = snap.bufferCount;
+        transformerCount = snap.transformerCount;
         // Top draw, aggregated per OWNER: a multiblock's hatches are ports of
         // one machine, so their draws sum under the controller's name (an
         // EBF on two 62 EU/t hatches is one 124 EU/t consumer, not two).
@@ -974,6 +979,10 @@ public class PowerMonitorCoverBehavior {
 
     public int getBufferCount() {
         return bufferCount;
+    }
+
+    public int getTransformerCount() {
+        return transformerCount;
     }
 
     public long getTopConsumerEUt() {

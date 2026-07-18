@@ -42,9 +42,23 @@ public enum PowerMonitorTier {
         return historySeconds > 0;
     }
 
+    /**
+     * PUBLIC-RELEASE SCOPE: tiers above MV are fully implemented (tier data,
+     * textures, lang entries, GUI behavior all present) but deliberately
+     * UNREGISTERED -- they have not been tested in-world yet. To re-enable
+     * for a future release, extend this array. It must remain a ULV-first
+     * prefix of values() so ordinals keep lining up with GT tier ints and
+     * item damage values.
+     */
+    public static PowerMonitorTier[] enabledTiers() {
+        return new PowerMonitorTier[] { ULV, LV, MV };
+    }
+
     public PowerMonitorTier next() {
+        // Walks the ENABLED slice, so the upgrade path can never step into
+        // an unregistered tier.
+        PowerMonitorTier[] enabled = enabledTiers();
         int i = this.ordinal();
-        PowerMonitorTier[] all = values();
-        return i + 1 < all.length ? all[i + 1] : this;
+        return i + 1 < enabled.length ? enabled[i + 1] : enabled[enabled.length - 1];
     }
 }
