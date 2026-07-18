@@ -217,9 +217,9 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             long pct = 100L * loss / g;
             String c = pct >= 10 ? "\u00a7e" : "\u00a7f";
             long v = voltage.getLongValue();
-            String s = "\u00a77Line loss: " + c + "~" + fmt(line) + amps(line, v) + " EU/t\u00a77";
+            String s = "\u00a77Line loss: " + c + "~" + fmt(line) + " EU/t" + amps(line, v) + "\u00a77";
             if (toll > 0) {
-                s += " \u00b7 Output loss: " + c + "~" + fmt(toll) + amps(toll, v) + " EU/t\u00a77";
+                s += " \u00b7 Output loss: " + c + "~" + fmt(toll) + " EU/t" + amps(toll, v) + "\u00a77";
             }
             return s + " (" + c + pct + "%\u00a77)";
         });

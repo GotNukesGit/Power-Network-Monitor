@@ -43,6 +43,7 @@ public class PowerMonitorCoverBehavior {
     private double emaTotalChargeSlope = 0.0; // EU/t
     private double emaBatterySlope = 0.0; // EU/t
     private long liveRelayTollEUt = 0L;
+    private boolean lastGenPinned = false; // shared with the outage tracker's headroom scaling
     private volatile java.util.Map<String, Long> liveInMachineFuelMb = java.util.Collections.emptyMap();
     private boolean lastDiscoveryTruncated = false;
     private int lastCablesVisited = 0; // diagnostic, shown in chat readout while chasing the discovery bug
@@ -398,7 +399,6 @@ public class PowerMonitorCoverBehavior {
         lastDiscoveryTruncated = discovery.truncated;
         lastCablesVisited = discovery.cablesVisited;
 
-        NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
         // Unify multi-hatch supply plants: a multiblock fed by hatches on
         // SEPARATE lines is one machine with one demand. After resolving
         // controllers, seed the walk from any of their hatches the BFS
@@ -426,6 +426,11 @@ public class PowerMonitorCoverBehavior {
                 break;
             }
         }
+        // Summarize AFTER hatch expansion: doing it before froze census and
+        // rated capacity on the anchor line while meters saw the unified
+        // network (field-observed: "2 gen ... 484 / 256 (189%)" from a
+        // 4-generator, 2-line plant).
+        NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
         NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
                 discovery.members);
         rebuildMeterTaps(discovery.members, multis);
@@ -506,6 +511,7 @@ public class PowerMonitorCoverBehavior {
         // aliasing can't fake it.
         long storageDrainEUt = emaBatterySlope < 0 ? Math.round(-emaBatterySlope) : 0L;
         boolean genPinned = liveMaxGenerationEUt > 0 && liveGenerationEUt * 100 >= liveMaxGenerationEUt * 95;
+        lastGenPinned = genPinned;
         int rawStatus;
         if (liveUnmetEUt > 0) {
             rawStatus = STATUS_BROWNOUT;
@@ -792,10 +798,16 @@ public class PowerMonitorCoverBehavior {
             return;
         }
         boolean shortfall = liveUnmetEUt > 0;
+        // Same headroom scaling as status escalation: generators pinned +
+        // unmet = real within 2s; generators with headroom + unmet is a
+        // spin-up unless it SURVIVES the ramp window (8s) -- recipe starts
+        // (especially multiblocks: demand appears in one tick, generation
+        // ramps over seconds) stop leaving phantom entries in the log.
+        int outageOnNeeded = lastGenPinned ? OUTAGE_ON : 8;
         if (shortfall) {
             outageOnStreak++;
             outageOffStreak = 0;
-            if (activeOutage == null && outageOnStreak >= OUTAGE_ON) {
+            if (activeOutage == null && outageOnStreak >= outageOnNeeded) {
                 activeOutage = new Outage();
                 activeOutage.startTime = worldTime;
                 outageLog.addFirst(activeOutage);
@@ -877,10 +889,14 @@ public class PowerMonitorCoverBehavior {
         // field-confirmed confusing (a reserve row showing a NEIGHBOR's
         // leaked diesel while the player's own engine-tank diesel sat one
         // section up, denominated in EU).
-        java.util.Map<String, Long> inMachines = liveInMachineFuelMb;
+        java.util.Map<String, Long> inMachines = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<String, Long> e : liveInMachineFuelMb.entrySet()) {
+            inMachines.merge(displayFluidName(e.getKey()), e.getValue(), Long::sum);
+        }
         java.util.LinkedHashMap<String, Long> connected = new java.util.LinkedHashMap<>();
         for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : ranked) {
-            connected.put(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1).getLocalizedName(), e.getValue());
+            connected.merge(displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1).getLocalizedName()),
+                    e.getValue(), Long::sum);
         }
         java.util.LinkedHashSet<String> allFluids = new java.util.LinkedHashSet<>(connected.keySet());
         allFluids.addAll(inMachines.keySet());
@@ -891,17 +907,19 @@ public class PowerMonitorCoverBehavior {
         java.util.HashSet<String> seen = new java.util.HashSet<>();
         java.util.List<String> lines = new java.util.ArrayList<>();
         for (String name : order) {
-            long conn = connected.getOrDefault(name, 0L);
-            long mach = inMachines.getOrDefault(name, 0L);
+            long total = connected.getOrDefault(name, 0L) + inMachines.getOrDefault(name, 0L);
             seen.add(name);
-            double[] track = reserveTracks.computeIfAbsent(name, k -> new double[] { conn, 0.0 });
+            double[] track = reserveTracks.computeIfAbsent(name, k -> new double[] { total, 0.0 });
             if (dtSeconds > 0) {
-                double slope = (conn - track[0]) / dtSeconds; // connected tanks only -- machine tanks cycle by design
+                // Slope on the TOTAL: tank->machine transfers cancel out,
+                // so this reads pure production-minus-consumption -- smoother
+                // than tracking either store alone.
+                double slope = (total - track[0]) / dtSeconds;
                 track[1] = track[1] == 0.0 ? slope : track[1] + (slope - track[1]) / 4.0;
             }
-            track[0] = conn;
+            track[0] = total;
             if (lines.size() < 3) {
-                lines.add(formatReserveLine(name, conn, mach, track[1]));
+                lines.add(formatReserveLine(name, total, track[1]));
             }
         }
         reserveTracks.keySet().retainAll(seen); // vanished fluids drop their tracks
@@ -911,31 +929,29 @@ public class PowerMonitorCoverBehavior {
         reserveLines = lines.toArray(new String[0]);
     }
 
-    private static String formatReserveLine(String name, long connectedL, long inMachineL, double slope) {
-        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(": ");
-        if (connectedL > 0) {
-            sb.append("\u00a7f")
-                    .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(connectedL))
-                    .append(" L\u00a77 connected");
+    /**
+     * GT's internal names for some fluids are unhelpful on a dashboard --
+     * diesel is literally registered as "Fuel". Display-only substitution;
+     * extend the map as further offenders appear.
+     */
+    private static String displayFluidName(String gtName) {
+        if ("Fuel".equals(gtName)) {
+            return "Diesel";
         }
-        if (inMachineL > 0) {
-            if (connectedL > 0) {
-                sb.append(" \u00b7 ");
-            }
-            sb.append("\u00a7f")
-                    .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(inMachineL))
-                    .append(" L\u00a77 in machines");
-        }
-        // Trend applies to CONNECTED tanks only (machine tanks cycle by design).
-        double floor = Math.max(1.0, connectedL / 50000.0);
-        if (connectedL > 0) {
-            if (slope > floor) {
-                sb.append(" \u00b7 \u00a7a+").append(Math.round(slope)).append(" L/s");
-            } else if (slope < -floor) {
-                long eta = (long) (connectedL / -slope);
-                sb.append(" \u00b7 \u00a7c").append(Math.round(slope)).append(" L/s ~")
-                        .append(PowerMonitorCover.formatSeconds(eta));
-            }
+        return gtName;
+    }
+
+    private static String formatReserveLine(String name, long totalL, double slope) {
+        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(": \u00a7f")
+                .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(totalL))
+                .append(" L");
+        double floor = Math.max(1.0, totalL / 50000.0);
+        if (slope > floor) {
+            sb.append(" \u00a77\u00b7 \u00a7a+").append(Math.round(slope)).append(" L/s");
+        } else if (slope < -floor) {
+            long eta = (long) (totalL / -slope);
+            sb.append(" \u00a77\u00b7 \u00a7c").append(Math.round(slope)).append(" L/s \u00a77~")
+                    .append(PowerMonitorCover.formatSeconds(eta));
         }
         return sb.toString();
     }

@@ -540,7 +540,12 @@ public final class NetworkDiscovery {
         MTEBasicGenerator gen = (MTEBasicGenerator) mte;
 
         snap.generatorCount++;
-        long rated = gen.maxEUOutput();
+        // Rated = V x output amps. GT++ combustion/rocket engines emit
+        // MULTIPLE amps (field-observed: "484 / 256 (189%)" from two
+        // engines) -- assuming 1A understates capacity, which poisons the
+        // headroom check and forces every spin-up onto the fast brownout
+        // path.
+        long rated = gen.maxEUOutput() * Math.max(1L, container.getOutputAmperage());
         snap.maxGenerationEUt += rated;
 
         long fuelEU = 0L;
