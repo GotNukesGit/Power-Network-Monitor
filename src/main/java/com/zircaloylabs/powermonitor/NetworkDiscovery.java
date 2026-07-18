@@ -279,6 +279,20 @@ public final class NetworkDiscovery {
         /** Sum of generators' rated output (maxEUOutput), i.e. generation capacity. */
         public long maxGenerationEUt = 0L;
 
+        /**
+         * Internal pass-through buffer only (tile getStoredEU/getEUCapacity
+         * -- excludes battery items). Batteries = totalBuffered - internal.
+         * The split matters: GT's 1/3-2/3 hysteresis band lets the internal
+         * level wander during pass-through while batteries sit untouched,
+         * so a headline that sums them "drains" while every battery reads
+         * 100% (field-observed).
+         */
+        public long internalBufferEU = 0L;
+        public long internalBufferCapacityEU = 0L;
+
+        /** Emission toll paid by fuel-less relays (buffers + transformers) -- real network loss. */
+        public long relayOutputTollEUt = 0L;
+
         /** Net storage flow: sum over buffers of (avgIn - avgOut). >0 charging, <0 discharging. */
         public long bufferNetChargeEUt = 0L;
 
@@ -383,11 +397,12 @@ public final class NetworkDiscovery {
             // keeps the energy balance exact.
             if (isTransformer(container)) {
                 snap.transformerCount++;
+                snap.relayOutputTollEUt += outputToll(container, container.getAverageElectricOutput());
                 continue;
             }
 
             long avgIn = container.getAverageElectricInput();
-            long avgOut = container.getAverageElectricOutput();
+            long avgOut = networkSideOutput(container, container.getAverageElectricOutput());
             if (avgOut > 0) {
                 snap.totalGenerationEUt += avgOut;
             }
@@ -422,6 +437,9 @@ public final class NetworkDiscovery {
             // getEUCapacity() only cover the machine's small internal buffer
             // (V*64 per slot) and ignore the batteries entirely -- using them
             // here would massively under-report the network's real storage.
+            snap.internalBufferEU += container.getStoredEU();
+            snap.internalBufferCapacityEU += container.getEUCapacity();
+            snap.relayOutputTollEUt += outputToll(container, container.getAverageElectricOutput());
             long[] storedAndCap = ((MTEBasicBatteryBuffer) mte).getStoredEnergy();
             snap.totalBufferedEU += storedAndCap[0];
             snap.totalBufferCapacityEU += storedAndCap[1];
@@ -497,7 +515,8 @@ public final class NetworkDiscovery {
         }
         snap.totalFuelReserveEU += fuelEU;
         snap.generatorFuelProfile
-                .add(new Snapshot.GeneratorProfile(container, container.getAverageElectricOutput(), rated, fuelEU));
+                .add(new Snapshot.GeneratorProfile(container,
+                        networkSideOutput(container, container.getAverageElectricOutput()), rated, fuelEU));
         return true;
     }
 
@@ -538,6 +557,32 @@ public final class NetworkDiscovery {
                         .add(mte.getLocalName() + " @ " + where + " : " + machine.mEUt + " EU/t (disabled -- excluded)");
             }
         }
+    }
+
+
+    /**
+     * OUTPUT LOSS (GT: BaseMetaTileEntity.handleEUOutput, comment "voltage +
+     * output loss"): every emitter decrements V + 2^max(0,tier-1) per amp
+     * while putting V on the wire. The average-output meter is credited with
+     * the DECREMENT, so raw averages overstate what the network receives by
+     * the toll: an LV generator at 4A reads 132 while the grid gets 128.
+     * These helpers convert meter-basis to network-basis. Generators refill
+     * the toll from fuel (burn loop fills toward maxEUStore uncapped), so
+     * their toll is invisible to the grid; RELAYS (buffers, transformers)
+     * have no fuel and bill their toll to transiting/stored energy -- that
+     * toll is real network loss and is accumulated separately.
+     */
+    public static long networkSideOutput(IBasicEnergyContainer container, long rawAvgOut) {
+        long v = container.getOutputVoltage();
+        if (v <= 0 || rawAvgOut <= 0) {
+            return Math.max(0L, rawAvgOut);
+        }
+        long toll = 1L << Math.max(0, gregtech.api.util.GTUtility.getTier(v) - 1);
+        return rawAvgOut * v / (v + toll);
+    }
+
+    public static long outputToll(IBasicEnergyContainer container, long rawAvgOut) {
+        return Math.max(0L, rawAvgOut - networkSideOutput(container, rawAvgOut));
     }
 
     public static String coordsOf(IBasicEnergyContainer container) {

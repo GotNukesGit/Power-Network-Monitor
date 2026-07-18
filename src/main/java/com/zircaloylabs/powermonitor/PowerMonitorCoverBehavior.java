@@ -26,6 +26,23 @@ public class PowerMonitorCoverBehavior {
     private long liveMaxGenerationEUt = 0L;
     private long liveBufferNetChargeEUt = 0L;
     private long anchorThroughputEUt = 0L; // this cable's rated V * A
+    private long anchorVoltage = 0L; // this cable's voltage -- the basis for all amp displays
+
+    // ---- Charge-level integrators ----
+    // Levels are integrals: their slopes are alias-free by construction
+    // (a level can't be mis-timed, only a rate can). Battery-only slope
+    // drives the stored-EU status and time estimates -- immune to both
+    // meter aliasing AND the internal band-drift that made a summed
+    // "Charge" appear to drain while every battery sat at 100%. Total-charge
+    // slope replaces the face-meter absorption term in the loss estimate,
+    // cutting it from three aliased inputs to two.
+    private long liveInternalEU = 0L;
+    private long liveInternalCapEU = 0L;
+    private long lastTotalCharge = -1L;
+    private long lastBatteryCharge = -1L;
+    private double emaTotalChargeSlope = 0.0; // EU/t
+    private double emaBatterySlope = 0.0; // EU/t
+    private long liveRelayTollEUt = 0L;
     private boolean lastDiscoveryTruncated = false;
     private int lastCablesVisited = 0; // diagnostic, shown in chat readout while chasing the discovery bug
 
@@ -215,12 +232,24 @@ public class PowerMonitorCoverBehavior {
         final boolean isGenerator;
         final String drawName; // owner-or-local name for per-name draw grouping
 
+        /** V/(V+toll): meter-basis -> network-basis for generator output reads (1.0 otherwise). */
+        final double netFactor;
+
         MeterTap(gregtech.api.interfaces.tileentity.IBasicEnergyContainer container, boolean isBuffer,
                 boolean isGenerator, String drawName) {
             this.container = container;
             this.isBuffer = isBuffer;
             this.isGenerator = isGenerator;
             this.drawName = drawName;
+            double f = 1.0;
+            if (isGenerator) {
+                long v = container.getOutputVoltage();
+                if (v > 0) {
+                    long toll = 1L << Math.max(0, gregtech.api.util.GTUtility.getTier(v) - 1);
+                    f = v / (double) (v + toll);
+                }
+            }
+            this.netFactor = f;
         }
     }
 
@@ -244,10 +273,15 @@ public class PowerMonitorCoverBehavior {
                 accDraw.merge(tap.drawName, in, Long::sum);
             }
             if (out > 0) {
-                accGen += out;
+                // Generator output converted meter-basis -> network-basis:
+                // the raw average is credited with the emission DECREMENT
+                // (V + 2^(tier-1) per amp), so an LV gen at 4A reads 132
+                // while the grid receives 128. Generation should state what
+                // the network gets; the toll is fuel-paid and invisible.
+                accGen += tap.isGenerator ? Math.round(out * tap.netFactor) : out;
             }
             if (tap.isGenerator) {
-                accGenOut.merge(tap.container, Math.max(0L, out), Long::sum);
+                accGenOut.merge(tap.container, Math.round(Math.max(0L, out) * tap.netFactor), Long::sum);
             }
         }
         meterSampleCount++;
@@ -325,6 +359,7 @@ public class PowerMonitorCoverBehavior {
         if (hostMte instanceof MTECable) {
             MTECable cable = (MTECable) hostMte;
             observedVoltage = cable.mVoltage;
+            anchorVoltage = cable.mVoltage;
             // Rated network throughput at this specific cable: V * A.
             // mVoltage/mAmperage are public final fields on MTECable
             // (verified against GT 5.09.54.20 source).
@@ -364,6 +399,19 @@ public class PowerMonitorCoverBehavior {
         liveFuelReserveEU = snap.totalFuelReserveEU;
         liveMaxGenerationEUt = snap.maxGenerationEUt;
         liveBufferNetChargeEUt = snap.bufferNetChargeEUt;
+        liveInternalEU = snap.internalBufferEU;
+        liveRelayTollEUt = snap.relayOutputTollEUt;
+        liveInternalCapEU = snap.internalBufferCapacityEU;
+        long batteryNow = Math.max(0L, liveBufferedEU - liveInternalEU);
+        if (lastTotalCharge >= 0) {
+            double dt = 20.0; // one full pass per second
+            double totalSlope = (liveBufferedEU - lastTotalCharge) / dt;
+            double batSlope = (batteryNow - lastBatteryCharge) / dt;
+            emaTotalChargeSlope += (totalSlope - emaTotalChargeSlope) / 8.0;
+            emaBatterySlope += (batSlope - emaBatterySlope) / 8.0;
+        }
+        lastTotalCharge = liveBufferedEU;
+        lastBatteryCharge = batteryNow;
         lastWorldTime = worldTime;
         liveDemandEUt = snap.totalDemandEUt + multis.demandEUt;
         multiCount = multis.controllers.size();
@@ -402,7 +450,10 @@ public class PowerMonitorCoverBehavior {
         liveUnmetEUt = rawShortfall > shortfallFloor ? rawShortfall : 0L;
 
         // ---- Tiered status ----
-        long storageDrainEUt = Math.max(0L, emaBufferOut - emaBufferIn); // >0: storage covering load
+        // Battery-integrator drain: the unambiguous definition of "running
+        // on stored EU" is batteries losing charge -- band drift and meter
+        // aliasing can't fake it.
+        long storageDrainEUt = emaBatterySlope < 0 ? Math.round(-emaBatterySlope) : 0L;
         boolean genPinned = liveMaxGenerationEUt > 0 && liveGenerationEUt * 100 >= liveMaxGenerationEUt * 95;
         int rawStatus;
         if (liveUnmetEUt > 0) {
@@ -459,7 +510,7 @@ public class PowerMonitorCoverBehavior {
         // what machines receive minus what storage absorbed must have died
         // in the cables. Smoothed inputs, clamped, ~labelled -- packet
         // aliasing leaves a couple EU/t of residue in this number.
-        long absorbed = emaBufferIn - emaBufferOut;
+        long absorbed = Math.round(emaTotalChargeSlope); // level-derived: alias-free, band-drift-correct
         long lossRaw = Math.max(0L, emaGeneration - emaConsumption - absorbed);
         // Difference of three signals -- noisiest number on the panel, and a
         // momentary zero is noise, not "loss stopped". Own EMA without the
@@ -1020,6 +1071,34 @@ public class PowerMonitorCoverBehavior {
         return shownBufferOutEUt;
     }
 
+    /** Emission toll currently paid by relays (buffers + transformers) -- the fuel-less output loss. */
+    public long getRelayTollEUt() {
+        return liveRelayTollEUt;
+    }
+
+    /** Battery-item charge only (headline reserve -- internal pass-through buffer excluded). */
+    public long getBatteryEU() {
+        return Math.max(0L, liveBufferedEU - liveInternalEU);
+    }
+
+    public long getBatteryCapacityEU() {
+        return Math.max(0L, liveBufferCapacityEU - liveInternalCapEU);
+    }
+
+    /** Internal pass-through buffer level (the operating fluid, wanders inside GT's 1/3-2/3 band). */
+    public long getInternalEU() {
+        return liveInternalEU;
+    }
+
+    public long getInternalCapacityEU() {
+        return liveInternalCapEU;
+    }
+
+    /** This cable's voltage -- the basis for every amp figure on the panel. */
+    public long getAnchorVoltage() {
+        return anchorVoltage;
+    }
+
     /** Named warning for buffers with zero batteries (dead output side), or "" if none. */
     public String getDeadBufferWarning() {
         return deadBufferWarning;
@@ -1046,11 +1125,12 @@ public class PowerMonitorCoverBehavior {
      * time-projection accessors below.)
      */
     public long getSecondsToEmpty() {
-        long netFlow = emaBufferIn - emaBufferOut; // the buffers' own charge rate
-        if (netFlow >= -flowSignificanceFloor() || liveBufferedEU <= 0) {
+        long slope = Math.round(emaBatterySlope); // battery integrator: alias-free
+        long battery = getBatteryEU();
+        if (slope >= -flowSignificanceFloor() || battery <= 0) {
             return -1;
         }
-        return liveBufferedEU / -netFlow / TICKS_PER_SECOND;
+        return battery / -slope / TICKS_PER_SECOND;
     }
 
     /**
@@ -1067,12 +1147,12 @@ public class PowerMonitorCoverBehavior {
 
     /** Seconds until buffer fills at current net surplus, or -1 if not charging / already full. */
     public long getSecondsToFull() {
-        long netFlow = emaBufferIn - emaBufferOut; // the buffers' own charge rate
-        long remaining = liveBufferCapacityEU - liveBufferedEU;
-        if (netFlow <= flowSignificanceFloor() || remaining <= 0) {
+        long slope = Math.round(emaBatterySlope); // battery integrator: alias-free
+        long remaining = getBatteryCapacityEU() - getBatteryEU();
+        if (slope <= flowSignificanceFloor() || remaining <= 0) {
             return -1;
         }
-        return remaining / netFlow / TICKS_PER_SECOND;
+        return remaining / slope / TICKS_PER_SECOND;
     }
 
     /** Seconds the fuel reserve lasts at the CURRENT generation rate, or -1 if unknowable (no gen / no fuel). */

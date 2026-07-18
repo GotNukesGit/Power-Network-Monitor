@@ -112,6 +112,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue storageOut = reg(syncManager, "pm_storageout", b::getBufferOutEUt);
         LongSyncValue buf = reg(syncManager, "pm_buf", b::getLiveBufferedEU);
         LongSyncValue bufCap = reg(syncManager, "pm_bufcap", b::getLiveBufferCapacityEU);
+        LongSyncValue bat = reg(syncManager, "pm_bat", b::getBatteryEU);
+        LongSyncValue batCap = reg(syncManager, "pm_batcap", b::getBatteryCapacityEU);
+        LongSyncValue internal = reg(syncManager, "pm_internal", b::getInternalEU);
+        LongSyncValue internalCap = reg(syncManager, "pm_internalcap", b::getInternalCapacityEU);
+        LongSyncValue voltage = reg(syncManager, "pm_voltage", b::getAnchorVoltage);
+        LongSyncValue relayToll = reg(syncManager, "pm_relaytoll", b::getRelayTollEUt);
         LongSyncValue secEmpty = reg(syncManager, "pm_secempty", b::getSecondsToEmpty);
         LongSyncValue secFull = reg(syncManager, "pm_secfull", b::getSecondsToFull);
         LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getFuelReserveEU);
@@ -148,13 +154,22 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 "\u00a7fDemand\u00a77: what running recipes want right now.",
                 "\u00a7fDelivered\u00a77: what machines actually received",
                 "\u00a77(always a bit less than generation -- cable loss).",
-                "\u00a7fCapacity\u00a77: rated maximums, not current output.");
+                "\u00a7fCapacity\u00a77: rated maximums, not current output.",
+                "\u00a77Amps are computed at \u00a7fthis cable's voltage\u00a77.",
+                "",
+                "\u00a76Output loss\u00a77: every GT emitter pays \u00a7fV + 2^(tier-1)\u00a77 from",
+                "\u00a77its buffer to put \u00a7fV\u00a77 on the wire (an LV emitter pays 33 per 32).",
+                "\u00a77Generators cover their toll with \u00a7fextra fuel\u00a77; buffers and",
+                "\u00a77transformers have no fuel, so their toll drains \u00a7fstorage\u00a77 --",
+                "\u00a77shown here as Output loss. Every relay stage costs ~3%.");
 
         row(column, () -> {
             long d = demand.getLongValue();
             long delivered = cons.getLongValue();
             long u = unmet.getLongValue();
-            String s = "\u00a77Demand: \u00a7f" + fmt(d) + "\u00a7r \u00a77Delivered: \u00a7f" + fmt(delivered) + "\u00a7r EU/t";
+            long v = voltage.getLongValue();
+            String s = "\u00a77Demand: \u00a7f" + fmt(d) + amps(d, v) + "\u00a7r \u00a77Delivered: \u00a7f" + fmt(delivered)
+                    + amps(delivered, v) + "\u00a7r EU/t";
             if (u > 0) {
                 s += "   \u00a7c\u26a0 Unmet: " + fmt(u);
             }
@@ -164,7 +179,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         row(column, () -> {
             long g = gen.getLongValue();
             long m = maxGen.getLongValue();
-            String s = "\u00a77Generation: \u00a7a" + fmt(g) + "\u00a7r";
+            String s = "\u00a77Generation: \u00a7a" + fmt(g) + amps(g, voltage.getLongValue()) + "\u00a7r";
             if (m > 0) {
                 s += " / " + fmt(m) + " EU/t (" + (100L * g / m) + "%)";
             } else {
@@ -192,9 +207,20 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             if (loss <= 0 || g <= 0) {
                 return "";
             }
+            // Split total destroyed energy into cable dissipation vs the
+            // emission toll paid by fuel-less relays (buffers/transformers
+            // decrement V + 2^(tier-1) per amp to put V on the wire --
+            // GT's output loss). Generators' own toll is fuel-paid and
+            // intentionally absent from both figures.
+            long toll = Math.min(loss, Math.max(0L, relayToll.getLongValue()));
+            long line = loss - toll;
             long pct = 100L * loss / g;
             String c = pct >= 10 ? "\u00a7e" : "\u00a7f";
-            return "\u00a77Line loss: " + c + "~" + fmt(loss) + " EU/t\u00a77 (" + c + pct + "%\u00a77)";
+            String s = "\u00a77Line loss: " + c + "~" + fmt(line) + " EU/t\u00a77";
+            if (toll > 0) {
+                s += " \u00b7 Output loss: " + c + "~" + fmt(toll) + " EU/t\u00a77";
+            }
+            return s + " (" + c + pct + "%\u00a77)";
         });
 
         divider(column);
@@ -212,9 +238,11 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             if (cap <= 0) {
                 return "\u00a7fNo storage on network";
             }
-            long stored = buf.getLongValue();
-            String s = "\u00a77Charge: \u00a7f" + fmt(stored) + "\u00a7r / " + fmt(cap) + " EU (" + (100L * stored / cap)
-                    + "%)";
+            long batteries = bat.getLongValue();
+            long batteriesCap = Math.max(1L, batCap.getLongValue());
+            String s = "\u00a77Charge: \u00a7f" + fmt(batteries) + "\u00a7r / " + fmt(batteriesCap) + " EU batteries ("
+                    + (100L * batteries / batteriesCap) + "%) \u00a78int " + fmt(internal.getLongValue()) + "/"
+                    + fmt(internalCap.getLongValue());
             long e = secEmpty.getLongValue();
             long f = secFull.getLongValue();
             if (e >= 0) {
@@ -240,8 +268,9 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             if (in == 0 && out == 0) {
                 s = "\u00a77Flow: \u00a7fidle";
             } else {
-                s = "\u00a77Flow: \u00a7ain " + fmt(in) + "\u00a7r / \u00a7cout " + fmt(out) + "\u00a7r EU/t (net "
-                        + (net >= 0 ? "\u00a7a+" : "\u00a7c") + fmt(net) + "\u00a7r)";
+                long v = voltage.getLongValue();
+                s = "\u00a77Flow: \u00a7ain " + fmt(in) + amps(in, v) + "\u00a7r / \u00a7cout " + fmt(out) + amps(out, v)
+                        + "\u00a7r EU/t (net " + (net >= 0 ? "\u00a7a+" : "\u00a7c") + fmt(net) + "\u00a7r)";
             }
             return s + " \u00a77Can push up to \u00a7f" + fmt(storageCap.getLongValue()) + "\u00a77 EU/t";
         });
@@ -501,5 +530,13 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
 
     private static String fmt(long v) {
         return NumberFormatUtil.formatNumber(v);
+    }
+
+    /** " (0.94A)" at this cable's voltage; empty when voltage is unknown. */
+    private static String amps(long eut, long voltage) {
+        if (voltage <= 0) {
+            return "";
+        }
+        return "\u00a77 (" + String.format("%.2f", eut / (double) voltage) + "A)";
     }
 }
