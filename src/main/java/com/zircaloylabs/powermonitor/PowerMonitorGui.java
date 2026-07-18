@@ -136,6 +136,9 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         StringSyncValue schedFull = regStr(syncManager, "pm_schedfull", b::getFuelScheduleFullBurn);
         StringSyncValue schedCur = regStr(syncManager, "pm_schedcur", b::getFuelScheduleCurrent);
         StringSyncValue deadBuffer = regStr(syncManager, "pm_deadbuf", b::getDeadBufferWarning);
+        StringSyncValue res0 = regStr(syncManager, "pm_res0", () -> b.getReserveLine(0));
+        StringSyncValue res1 = regStr(syncManager, "pm_res1", () -> b.getReserveLine(1));
+        StringSyncValue res2 = regStr(syncManager, "pm_res2", () -> b.getReserveLine(2));
         StringSyncValue outage0 = regStr(syncManager, "pm_outage0", () -> b.getOutageSummary(0));
         StringSyncValue outage1 = regStr(syncManager, "pm_outage1", () -> b.getOutageSummary(1));
 
@@ -275,6 +278,14 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             String sched = schedCur.getStringValue();
             return sched.isEmpty() ? "\u00a77Current:    \u00a7fgenerators idle" : "\u00a77Current:    \u00a7f" + sched;
         });
+
+        // Connected reserves: tanks + pipes on the generators' plumbing.
+        // In-machine fuel above is GUARANTEED runway; these lines assume the
+        // plumbing keeps delivering -- and each reserve's measured trend
+        // announces whether production is keeping it charged.
+        row(column, () -> res0.getStringValue());
+        row(column, () -> res1.getStringValue());
+        row(column, () -> res2.getStringValue());
 
         divider(column);
 

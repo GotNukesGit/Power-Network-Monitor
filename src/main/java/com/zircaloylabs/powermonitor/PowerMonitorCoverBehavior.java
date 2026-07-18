@@ -85,6 +85,18 @@ public class PowerMonitorCoverBehavior {
             .emptyList();
     private volatile java.util.List<String> lastDemandLines = java.util.Collections.emptyList();
 
+    // ---- Connected fuel reserves (tanks + pipes on the generators' plumbing) ----
+    // Slow-polled: reserves change over minutes, not ticks. Trend is MEASURED
+    // (EMA of the level's slope), so whether a reserve behaves as a battery
+    // (production charging it) or a depleting stock is announced by the
+    // number, not assumed from the fluid type.
+    private static final int RESERVE_POLL_EVERY = 10; // full-pass samples between scans (~10 s)
+    private static final int RESERVE_MAX_PIPES = 128;
+    private int reservePollCountdown = 0;
+    private long lastReservePollTime = -1L;
+    private final java.util.HashMap<String, double[]> reserveTracks = new java.util.HashMap<>(); // name -> {lastLiters, emaSlope}
+    private volatile String[] reserveLines = new String[0];
+
     // Chat alerting: escalations to ON_STORED/BROWNOUT and named power-loss
     // events get announced to nearby players (the dashboard only helps if
     // you're looking at it). Rate-limited; a recovery message re-arms it.
@@ -402,10 +414,21 @@ public class PowerMonitorCoverBehavior {
         } else {
             rawStatus = STATUS_HEALTHY;
         }
+        // Escalation persistence scaled by headroom. A recipe start makes
+        // demand appear in ONE tick while generation ramps over seconds, so
+        // unmet spikes briefly on every startup -- but unmet WITH generator
+        // headroom self-resolves by definition (gens ramp to close it),
+        // UNLESS a transit constraint (amp-choked segment) blocks them,
+        // which reveals itself by persisting. So: gens pinned + unmet =
+        // brownout in 2 samples (nothing left to give -- it's real now);
+        // gens with headroom + unmet = require 8 sustained samples (spin-ups
+        // die in 3-5; chokes survive 8 easily). Both real failure modes stay
+        // detectable; startup flashes don't.
+        int upSamplesNeeded = (rawStatus == STATUS_BROWNOUT && !genPinned) ? 8 : STATUS_UP_SAMPLES;
         if (rawStatus > shownStatus) {
             statusUpStreak++;
             statusDownStreak = 0;
-            if (statusUpStreak >= STATUS_UP_SAMPLES) {
+            if (statusUpStreak >= upSamplesNeeded) {
                 shownStatus = rawStatus;
                 statusUpStreak = 0;
             }
@@ -477,6 +500,7 @@ public class PowerMonitorCoverBehavior {
         }
 
         resetMeterAccumulators();
+        pollFluidReserves(worldTime);
         trackOutage(worldTime);
         trackControllerPowerLoss(multis, worldTime);
         if (lastPowerLossAlert != null) {
@@ -732,6 +756,65 @@ public class PowerMonitorCoverBehavior {
         }
     }
 
+    private void pollFluidReserves(long worldTime) {
+        if (reservePollCountdown-- > 0) {
+            return;
+        }
+        reservePollCountdown = RESERVE_POLL_EVERY - 1;
+        FluidReserves.Result scan = FluidReserves.scan(lastMembers, RESERVE_MAX_PIPES);
+        double dtSeconds = lastReservePollTime >= 0 ? Math.max(1.0, (worldTime - lastReservePollTime) / 20.0)
+                : -1.0;
+        lastReservePollTime = worldTime;
+
+        java.util.List<java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long>> ranked = new java.util.ArrayList<>(
+                scan.litersByFluid.entrySet());
+        ranked.sort((a, b2) -> Long.compare(b2.getValue(), a.getValue()));
+
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        java.util.List<String> lines = new java.util.ArrayList<>();
+        for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : ranked) {
+            String name = new net.minecraftforge.fluids.FluidStack(e.getKey(), 1).getLocalizedName();
+            long liters = e.getValue();
+            seen.add(name);
+            double[] track = reserveTracks.computeIfAbsent(name, k -> new double[] { liters, 0.0 });
+            if (dtSeconds > 0) {
+                double slope = (liters - track[0]) / dtSeconds; // L/s, signed
+                track[1] = track[1] == 0.0 ? slope : track[1] + (slope - track[1]) / 4.0;
+            }
+            track[0] = liters;
+            if (lines.size() < 3) {
+                lines.add(formatReserveLine(name, liters, track[1]));
+            }
+        }
+        reserveTracks.keySet().retainAll(seen); // vanished fluids drop their tracks
+        if (scan.truncated) {
+            lines.add("\u00a78  (pipe network larger than scanned)");
+        }
+        reserveLines = lines.toArray(new String[0]);
+    }
+
+    private static String formatReserveLine(String name, long liters, double slope) {
+        String base = "\u00a77" + name + ": \u00a7f"
+                + com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(liters) + " L\u00a77 \u00b7 ";
+        // Significance floor mirrors the storage-flow rule: a couple L/s of
+        // packet-y wobble is idle, not a forecast.
+        double floor = Math.max(1.0, liters / 50000.0);
+        if (slope > floor) {
+            return base + "\u00a7a+" + Math.round(slope) + " L/s charging";
+        }
+        if (slope < -floor) {
+            long eta = (long) (liters / -slope);
+            return base + "\u00a7c" + Math.round(slope) + " L/s \u00b7 ~" + PowerMonitorCover.formatSeconds(eta);
+        }
+        return base + "\u00a7fsteady";
+    }
+
+    /** Connected-reserve display line for the given rank, or "". */
+    public String getReserveLine(int index) {
+        String[] lines = reserveLines;
+        return index < lines.length ? lines[index] : "";
+    }
+
     /**
      * Full diagnostic dump for sneak-screwdriver: every member with
      * classification, class name, and coordinates, then demand attribution.
@@ -845,12 +928,24 @@ public class PowerMonitorCoverBehavior {
         }
         StringBuilder sb = new StringBuilder();
         int steps = 0;
+        String lastTime = null;
         for (double[] it : items) {
+            String time = PowerMonitorCover.formatSeconds((long) it[1]);
+            // Generators dying at the SAME formatted time are one rung, not
+            // several: "128→15s, 96→15s" collapses to "128→15s" -- the
+            // pre-drop rate holds until that shared moment, and whatever
+            // survives becomes the next distinct rung (which also frees the
+            // second display slot for it instead of a duplicate).
+            if (time.equals(lastTime)) {
+                totalRate -= (long) it[0];
+                continue;
+            }
             if (steps > 0) {
                 sb.append(", ");
             }
             sb.append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(totalRate))
-                    .append("→").append(PowerMonitorCover.formatSeconds((long) it[1]));
+                    .append("→").append(time);
+            lastTime = time;
             totalRate -= (long) it[0];
             steps++;
             if (steps >= 2 && totalRate > 0) {
