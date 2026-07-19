@@ -21,7 +21,7 @@ as machines):
   the lower.
 - **Step-up:** accepts up to 4 low-tier amps (the tooltip's number; it will
   actually take one extra to keep its buffer fed), emits **1A of the higher
-  tier** -- which makes a single step-up transformer a <Color color="#55FFFF"><Tooltip label="hard ceiling">A step-up transformer emits exactly 1 amp of the higher tier -- 128 EU/t for LV/MV -- no matter how much low-tier power feeds it. Parallel transformers raise the ceiling.</Tooltip></Color> of one
+  tier** -- which makes a single step-up transformer a <Color color="#7FFFFF"><Tooltip label="hard ceiling">A step-up transformer emits exactly 1 amp of the higher tier -- 128 EU/t for LV/MV -- no matter how much low-tier power feeds it. Parallel transformers raise the ceiling.</Tooltip></Color> of one
   high-tier packet per tick on everything behind it.
 
 That output ceiling is the number to check when a step-up network feels
@@ -31,5 +31,25 @@ MV side, no matter what feeds it.
 Hi-Amp transformers (4A high side, 16A low side) exist; check NEI for when
 their recipes become available to you.
 
-<!-- TODO scene: the LV/MV step-up rig -->
+### <Color color="#FFAA00">Scene: step-up and the ceiling</Color>
+
+<GameScene zoom={3.5} height={300} interactive={true}>
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="0" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="1" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="0" y="0" z="2" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="1" y="0" z="2" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653}' x="2" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:21}' x="3" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1366}' x="4" y="0" z="1" />
+  <BlockAnnotation pos="0 0 0" color="#8044DD66" thickness="2">
+
+**4x LV generators** -- 128 EU/t combined at 4A. Exactly what one step-up transformer can swallow.
+
+  </BlockAnnotation>
+  <BlockAnnotation pos="3 0 1" color="#80AA66DD" thickness="2">
+
+**LV/MV Transformer, step-up** -- the single-dot face is the high-voltage side, always. Accepts 4A of LV; emits **1A of MV -- a hard 128 EU/t ceiling** on everything downstream. Need more? Parallel transformers.
+
+  </BlockAnnotation>
+</GameScene>
 

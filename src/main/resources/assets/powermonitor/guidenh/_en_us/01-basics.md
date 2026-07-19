@@ -8,8 +8,8 @@ navigation:
 
 # The Packet Model: Volts and Amps
 
-GT power is not a fluid. It moves in <Color color="#55FFFF"><Color color="#55FFFF"><Tooltip label="packets">One packet = one amp's worth of one tick's delivery: V EU traveling together. Packets never split -- a machine takes the whole packet or none.</Tooltip></Color></Color>: each packet holds V EU
-(the *voltage*), and <Color color="#55FFFF"><Tooltip label="amperage">Packets per tick. One whole 32 EU packet arriving each tick is one LV amp -- packets never split.</Tooltip></Color> is how many packets pass per tick.
+GT power is not a fluid. It moves in <Color color="#7FFFFF"><Color color="#7FFFFF"><Tooltip label="packets">One packet = one amp's worth of one tick's delivery: V EU traveling together. Packets never split -- a machine takes the whole packet or none.</Tooltip></Color></Color>: each packet holds V EU
+(the *voltage*), and <Color color="#7FFFFF"><Tooltip label="amperage">Packets per tick. One whole 32 EU packet arriving each tick is one LV amp -- packets never split.</Tooltip></Color> is how many packets pass per tick.
 
 - An LV generator emits 1 packet of 32 EU per tick: **32 EU/t at 1A**.
 - Four LV generators on one cable: 32V at 4A = 128 EU/t. This is **not** MV.

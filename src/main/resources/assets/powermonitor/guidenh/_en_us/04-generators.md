@@ -31,3 +31,21 @@ tank between boilers and turbines behaves like a battery. Watch its level:
 rising means the boilers are winning; falling means the turbines are living
 off reserves.
 
+### <Color color="#FFAA00">Scene: the steam appetite</Color>
+
+<GameScene zoom={3.5} height={300} interactive={true}>
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:101}' x="0" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:101}' x="0" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="2" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="2" y="0" z="1" />
+  <BlockAnnotation pos="0 0 0" color="#80DD6644" thickness="2">
+
+**High Pressure Coal Boilers** -- steam production is the real limit on turbine output. Total the boiler bank's L/t against the turbines' demand *before* wondering why the batteries drain.
+
+  </BlockAnnotation>
+  <BlockAnnotation pos="2 0 0" color="#8044DD66" thickness="2">
+
+**Basic Steam Turbine (x2)** -- each gulps 7 L for 3 EU: full 32 EU/t output needs a *sustained* ~75 L/t. Two turbines: **~150 L/t, every tick.** Fed 140, they quietly make less while looking busy.
+
+  </BlockAnnotation>
+</GameScene>

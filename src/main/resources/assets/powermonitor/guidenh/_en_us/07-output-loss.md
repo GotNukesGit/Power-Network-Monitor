@@ -10,7 +10,7 @@ navigation:
 
 Power never moves for free in GT. Cables charge per meter -- but even a
 lossless cable can't make transfer free, because **every emitter charges
-admission**: any block that puts EU onto a wire pays a <Color color="#55FFFF"><Tooltip label="toll">V + 2^(tier-1) EU per amp, decremented from the emitter's buffer while only V goes on the wire.</Tooltip></Color> to do it:
+admission**: any block that puts EU onto a wire pays a <Color color="#7FFFFF"><Tooltip label="toll">V + 2^(tier-1) EU per amp, decremented from the emitter's buffer while only V goes on the wire.</Tooltip></Color> to do it:
 
 <Latex formula="\text{paid} = V + 2^{\max(0,\ tier-1)} \quad\text{per amp, to emit } V"/>
 
@@ -77,7 +77,7 @@ The rig from the ledger above, faithfully: four LV generators through two
 buffers onto a lossless backbone, stepped up to MV, delivered through copper.
 **Hover any block** for its stage's role and toll. Rotate and zoom.
 
-<GameScene zoom={2.5} interactive={true}>
+<GameScene zoom={3.5} height={340} interactive={true}>
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="0" y="0" z="0" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="1" y="0" z="0" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="0" y="0" z="2" />
@@ -87,7 +87,7 @@ buffers onto a lossless backbone, stepped up to MV, delivered through copper.
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653}' x="3" y="0" z="0" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653}' x="3" y="0" z="1" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653}' x="3" y="0" z="2" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:2559}' x="4" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:21}' x="4" y="0" z="1" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1366}' x="5" y="0" z="1" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1366}' x="6" y="0" z="1" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:282}' x="7" y="0" z="1" />

@@ -9,7 +9,7 @@ navigation:
 # Battery Buffers
 
 A battery buffer holds energy in two places: the **batteries** in its slots
--- the real reserve -- and the buffer block's own small <Color color="#55FFFF"><Tooltip label="holding tank">The buffer BLOCK's internal store (2,048 EU per slot at LV) that packets flow through -- shown as 'tank' on the Power Monitor. Not your batteries.</Tooltip></Color>
+-- the real reserve -- and the buffer block's own small <Color color="#7FFFFF"><Tooltip label="holding tank">The buffer BLOCK's internal store (2,048 EU per slot at LV) that packets flow through -- shown as 'tank' on the Power Monitor. Not your batteries.</Tooltip></Color>
 (2,048 EU per slot at LV; this is the buffer's tank, not the machine buffers
 from the [Machines](03-machines.md) chapter). Packets moving through the
 buffer flow through the holding tank; the batteries only get involved at
@@ -34,7 +34,7 @@ a thermostat that won't fire the furnace over half a degree:
 
 - Holding tank above **2/3** -> surplus pours into the batteries.
 - Holding tank below **1/3** -> the batteries release just enough to refloat it.
-- In the wide middle -- the <Color color="#55FFFF"><Tooltip label="dead band">The deliberate no-action zone between 1/3 and 2/3. Without it the batteries would churn on every packet; with it they act only on real trends.</Tooltip></Color> -- **nothing moves, by design.**
+- In the wide middle -- the <Color color="#7FFFFF"><Tooltip label="dead band">The deliberate no-action zone between 1/3 and 2/3. Without it the batteries would churn on every packet; with it they act only on real trends.</Tooltip></Color> -- **nothing moves, by design.**
 
 On a healthy network with spare generation, the tank rides high and the
 batteries stay genuinely full. But on a network whose supply *barely* covers
