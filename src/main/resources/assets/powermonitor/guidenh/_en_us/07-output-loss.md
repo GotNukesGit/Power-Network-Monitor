@@ -9,7 +9,7 @@ navigation:
 
 Power never moves for free in GT. Cables charge per meter -- but even a
 lossless cable can't make transfer free, because **every emitter charges
-admission**: any block that puts EU onto a wire pays a <Tooltip label="toll" tooltip="V + 2^(tier-1) EU per amp, decremented from the emitter's buffer while only V goes on the wire"/> to do it:
+admission**: any block that puts EU onto a wire pays a <Tooltip label="toll">V + 2^(tier-1) EU per amp, decremented from the emitter's buffer while only V goes on the wire.</Tooltip> to do it:
 
 <Latex formula="\text{paid} = V + 2^{\max(0,\ tier-1)} \quad\text{per amp, to emit } V"/>
 
@@ -76,12 +76,12 @@ Every GT machine shares one block id (the tile data differentiates them), so
 the hulls below are generic -- the labels carry the meaning. Rotate and zoom.
 
 <GameScene zoom={3} interactive={true}>
-  <Block id="gregtech:gt.blockmachines" x="0" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" x="1" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" x="2" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" x="3" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" x="4" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" x="5" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="0" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:191}' x="1" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653}' x="2" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:2559}' x="3" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1366}' x="4" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:282}' x="5" y="0" z="0" />
   <BlockAnnotation pos="0 0 0" color="#8044DD66" thickness="2" alwaysOnTop="true">generators -- toll paid by fuel</BlockAnnotation>
   <BlockAnnotation pos="1 0 0" color="#80FFAA00" thickness="2" alwaysOnTop="true">buffer -- pays 33 per 32, from batteries</BlockAnnotation>
   <BlockAnnotation pos="2 0 0" color="#80AAAAAA" thickness="2" alwaysOnTop="true">4A lossless backbone</BlockAnnotation>

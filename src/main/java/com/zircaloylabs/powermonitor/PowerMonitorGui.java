@@ -143,9 +143,13 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         StringSyncValue schedFull = regStr(syncManager, "pm_schedfull", b::getFuelScheduleFullBurn);
         StringSyncValue schedCur = regStr(syncManager, "pm_schedcur", b::getFuelScheduleCurrent);
         StringSyncValue deadBuffer = regStr(syncManager, "pm_deadbuf", b::getDeadBufferWarning);
-        StringSyncValue res0 = regStr(syncManager, "pm_res0", () -> b.getReserveLine(0));
-        StringSyncValue res1 = regStr(syncManager, "pm_res1", () -> b.getReserveLine(1));
-        StringSyncValue res2 = regStr(syncManager, "pm_res2", () -> b.getReserveLine(2));
+        StringSyncValue res0 = regStr(syncManager, "pm_res0", () -> b.getFuelRow(0));
+        StringSyncValue res1 = regStr(syncManager, "pm_res1", () -> b.getFuelRow(1));
+        StringSyncValue res2 = regStr(syncManager, "pm_res2", () -> b.getFuelRow(2));
+        StringSyncValue res3 = regStr(syncManager, "pm_res3", () -> b.getFuelRow(3));
+        StringSyncValue res4 = regStr(syncManager, "pm_res4", () -> b.getFuelRow(4));
+        StringSyncValue res5 = regStr(syncManager, "pm_res5", () -> b.getFuelRow(5));
+        StringSyncValue cycles = regStr(syncManager, "pm_cycles", b::getCyclesLine);
         StringSyncValue outage0 = regStr(syncManager, "pm_outage0", () -> b.getOutageSummary(0));
         StringSyncValue outage1 = regStr(syncManager, "pm_outage1", () -> b.getOutageSummary(1));
 
@@ -318,6 +322,9 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         row(column, () -> res0.getStringValue());
         row(column, () -> res1.getStringValue());
         row(column, () -> res2.getStringValue());
+        row(column, () -> res3.getStringValue());
+        row(column, () -> res4.getStringValue());
+        row(column, () -> res5.getStringValue());
 
         divider(column);
 
@@ -344,6 +351,8 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             String line = top0.getStringValue();
             return line.isEmpty() ? "\u00a77Top draw: \u00a7fnone" : "\u00a77Top draw: \u00a7f" + line;
         });
+        row(column, () -> cycles.getStringValue());
+        row(column, () -> cycles.getStringValue());
         // Network-scope peaks (moved from the per-segment cable row).
         row(column, () -> {
             String s = "\u00a77Peak demand: \u00a7f" + fmt(peakDemand.getLongValue());

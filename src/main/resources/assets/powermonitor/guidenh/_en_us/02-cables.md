@@ -27,7 +27,7 @@ arrives, not what was sent.
 
 <Latex formula="\text{deliverable} = \text{rating} - (\text{blocks} \times \text{loss} \times \text{amps})"/>
 
-The nameplate is an <Tooltip label="injection ceiling" tooltip="The most EU/t a source can PUT ONTO this cable -- what arrives downstream is always less by the path loss"/>. Nobody downstream ever receives
+The nameplate is an <Tooltip label="injection ceiling">The most EU/t a source can PUT ONTO this cable -- what arrives downstream is always less by the path loss.</Tooltip>. Nobody downstream ever receives
 the nameplate.
 
 ## Connections

@@ -62,6 +62,9 @@ public class PowerMonitorCoverBehavior {
     private long prevDemandForStep = -1L;
     private volatile long lastConnectedReserveEU = 0L;
     private volatile java.util.List<String> lastReserveDiag = java.util.Collections.emptyList();
+    private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
+    private volatile String[] sharedFuelRows = new String[0]; // connected pipe/tank pools, 10 s
+    private volatile String cyclesLine = "";
     private final java.util.HashMap<String, java.util.ArrayDeque<long[]>> reserveWindows = new java.util.HashMap<>();
     private static final long RESERVE_WINDOW_TICKS = 20L * 300; // 5 minutes
     private int liveSupplyLines = 1;
@@ -139,7 +142,7 @@ public class PowerMonitorCoverBehavior {
     private int reservePollCountdown = 0;
     private long lastReservePollTime = -1L;
     private final java.util.HashMap<String, double[]> reserveTracks = new java.util.HashMap<>(); // name -> {lastLiters, emaSlope}
-    private volatile String[] reserveLines = new String[0];
+
 
     // Chat alerting: escalations to ON_STORED/BROWNOUT and named power-loss
     // events get announced to nearby players (the dashboard only helps if
@@ -465,6 +468,17 @@ public class PowerMonitorCoverBehavior {
         NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(allControllers,
                 discovery.members, runnableEU);
         rebuildMeterTaps(discovery.members, multis);
+        String cl = "";
+        for (NetworkDiscovery.ControllerState st : multis.controllers) {
+            if (st.demandEUt > 0 && st.controller.mMaxProgresstime > 0 && runnableEU > 0) {
+                long perCycle = st.demandEUt * st.controller.mMaxProgresstime;
+                if (perCycle > 0) {
+                    cl = "\u00a77" + st.name + ": \u00a7ffuel for ~" + (runnableEU / perCycle) + " cycles";
+                    break;
+                }
+            }
+        }
+        cyclesLine = cl;
         lastMembers = discovery.members;
         java.util.List<String> dl = new java.util.ArrayList<>(snap.demandLines);
         dl.addAll(multis.demandLines);
@@ -698,8 +712,60 @@ public class PowerMonitorCoverBehavior {
         }
         emaFuelReserve = ema(emaFuelReserve, snap.totalFuelReserveEU);
         shownFuelReserveEU = applyDeadband(shownFuelReserveEU, emaFuelReserve);
+        // Per-generator fuel rows: each generator, its OWN internal tank
+        // (operator-specified layout -- the unified ladder blends both
+        // supply lines into one anonymous pool; these rows restore
+        // attribution). Shared pipe/tank reserves render separately, once.
+        {
+            java.util.List<String> rows = new java.util.ArrayList<>();
+            int extra = 0;
+            for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
+                if (rows.size() >= 4) {
+                    extra++;
+                    continue;
+                }
+                StringBuilder r = new StringBuilder("\u00a77")
+                        .append(NetworkDiscovery.localNameOf(p.source)).append(": ");
+                if (p.fuelMb > 0) {
+                    r.append("\u00a7f").append(displayFluidName(p.fuelName)).append(" ")
+                            .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil
+                                    .formatNumber(p.fuelMb))
+                            .append(" L\u00a77");
+                } else if (p.fuelEU > 0) {
+                    r.append("\u00a7fitem fuel\u00a77");
+                } else {
+                    r.append("\u00a78empty\u00a77");
+                }
+                if (p.fuelEU > 0 && p.ratedEUt > 0) {
+                    r.append(" \u00b7 ~").append(PowerMonitorCover.formatSeconds(p.fuelEU / p.ratedEUt / 20));
+                }
+                rows.add(r.toString());
+            }
+            if (extra > 0) {
+                rows.add("\u00a78  \u2026 " + extra + " more generators");
+            }
+            genFuelRows = rows.toArray(new String[0]);
+        }
         fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true);
         fuelScheduleCurrent = buildFuelSchedule(smoothedProfile, false);
+        // Per-generator internal reserves: EACH generator, its own fuel, its
+        // own runway at rated burn (operator-specified layout -- the unified
+        // ladder is the network view, these are the machines).
+        java.util.List<String> gr = new java.util.ArrayList<>();
+        for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
+            if (gr.size() >= 4) {
+                gr.add("\u00a78  \u2026 " + (snap.generatorFuelProfile.size() - 4) + " more generators");
+                break;
+            }
+            String fuel = p.fuelMb > 0 ? displayFluidName(p.fuelName) + " \u00a7f"
+                    + com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(p.fuelMb) + " L"
+                    : "\u00a78empty";
+            String runway = p.ratedEUt > 0 && p.fuelEU > 0
+                    ? " \u00a77\u00b7 ~" + PowerMonitorCover.formatSeconds(p.fuelEU / p.ratedEUt / TICKS_PER_SECOND)
+                    : "";
+            gr.add("\u00a77" + NetworkDiscovery.localNameOf(p.source) + ": \u00a77" + fuel + runway);
+        }
+        genFuelRows = gr.toArray(new String[0]);
 
         if (history != null) {
             history.record(rawConsumption, rawGeneration, liveDemandEUt, liveBufferedEU,
@@ -961,25 +1027,17 @@ public class PowerMonitorCoverBehavior {
         // field-confirmed confusing (a reserve row showing a NEIGHBOR's
         // leaked diesel while the player's own engine-tank diesel sat one
         // section up, denominated in EU).
-        java.util.Map<String, Long> inMachines = new java.util.LinkedHashMap<>();
-        for (java.util.Map.Entry<String, Long> e : liveInMachineFuelMb.entrySet()) {
-            inMachines.merge(displayFluidName(e.getKey()), e.getValue(), Long::sum);
-        }
         java.util.LinkedHashMap<String, Long> connected = new java.util.LinkedHashMap<>();
         for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : ranked) {
             connected.merge(displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1).getLocalizedName()),
                     e.getValue(), Long::sum);
         }
-        java.util.LinkedHashSet<String> allFluids = new java.util.LinkedHashSet<>(connected.keySet());
-        allFluids.addAll(inMachines.keySet());
-        java.util.List<String> order = new java.util.ArrayList<>(allFluids);
-        order.sort((a, b2) -> Long.compare(
-                connected.getOrDefault(b2, 0L) + inMachines.getOrDefault(b2, 0L),
-                connected.getOrDefault(a, 0L) + inMachines.getOrDefault(a, 0L)));
+        java.util.List<String> order = new java.util.ArrayList<>(connected.keySet());
+        order.sort((a, b2) -> Long.compare(connected.get(b2), connected.get(a)));
         java.util.HashSet<String> seen = new java.util.HashSet<>();
         java.util.List<String> lines = new java.util.ArrayList<>();
         for (String name : order) {
-            long total = connected.getOrDefault(name, 0L) + inMachines.getOrDefault(name, 0L);
+            long total = connected.get(name); // shared pools only -- per-gen internal shown on its own rows
             seen.add(name);
             double[] track = reserveTracks.computeIfAbsent(name, k -> new double[] { total, 0.0 });
             if (dtSeconds > 0) {
@@ -1010,15 +1068,15 @@ public class PowerMonitorCoverBehavior {
                     windowed = true;
                 }
             }
-            if (lines.size() < 3) {
-                lines.add(formatReserveLine(name, total, netRate, windowed));
+            if (lines.size() < 2) {
+                lines.add("\u00a77Shared: " + formatReserveLine(name, total, netRate, windowed).substring(2));
             }
         }
         reserveTracks.keySet().retainAll(seen); // vanished fluids drop their tracks
         if (scan.truncated) {
             lines.add("\u00a78  (pipe network larger than scanned)");
         }
-        reserveLines = lines.toArray(new String[0]);
+        sharedFuelRows = lines.toArray(new String[0]);
     }
 
     /**
@@ -1034,7 +1092,7 @@ public class PowerMonitorCoverBehavior {
     }
 
     private static String formatReserveLine(String name, long totalL, double slope, boolean windowed) {
-        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(": \u00a7f")
+        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(" \u00a78(shared)\u00a77: \u00a7f")
                 .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(totalL))
                 .append(" L");
         double floor = Math.max(1.0, totalL / 50000.0);
@@ -1049,10 +1107,18 @@ public class PowerMonitorCoverBehavior {
         return sb.toString();
     }
 
-    /** Connected-reserve display line for the given rank, or "". */
-    public String getReserveLine(int index) {
-        String[] lines = reserveLines;
-        return index < lines.length ? lines[index] : "";
+    /** Combined fuel rows: per-generator internals first, then shared pools. */
+    public String getFuelRow(int index) {
+        String[] g = genFuelRows;
+        String[] sh = sharedFuelRows;
+        if (index < g.length) {
+            return g[index];
+        }
+        return index - g.length < sh.length ? sh[index - g.length] : "";
+    }
+
+    public String getCyclesLine() {
+        return cyclesLine;
     }
 
     /**

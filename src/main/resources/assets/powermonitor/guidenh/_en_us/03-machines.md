@@ -19,7 +19,7 @@ This smooths the mismatch between packet sizes and recipe draws.
 <Latex formula="\text{maxAmpsIn} = \frac{2 \times \text{recipe EU/t}}{V_{tier}} + 1"/>
 For ordinary recipes that's 2A -- which is why one machine can't hog a line.
 
-**Starvation:** a machine that can't drain its recipe's EU/t <Tooltip label="stutters" tooltip="Progress freezes (parked at -100 internally); the machine looks idle but still reports its full recipe demand"/> --
+**Starvation:** a machine that can't drain its recipe's EU/t <Tooltip label="stutters">Progress freezes (parked at -100 internally); the machine looks idle but still reports its full recipe demand.</Tooltip> --
 progress freezes (internally the progress counter is parked at -100) and it
 sips power without advancing. It looks idle. It is not idle: it still demands.
 

@@ -413,12 +413,17 @@ public final class NetworkDiscovery {
             public final long rawOutEUt;
             public final long ratedEUt;
             public final long fuelEU;
+            public final String fuelName; // internal tank fluid display name, or "" if item/empty
+            public final long fuelMb;
 
-            GeneratorProfile(IBasicEnergyContainer source, long rawOutEUt, long ratedEUt, long fuelEU) {
+            GeneratorProfile(IBasicEnergyContainer source, long rawOutEUt, long ratedEUt, long fuelEU,
+                    String fuelName, long fuelMb) {
                 this.source = source;
                 this.rawOutEUt = rawOutEUt;
                 this.ratedEUt = ratedEUt;
                 this.fuelEU = fuelEU;
+                this.fuelName = fuelName;
+                this.fuelMb = fuelMb;
             }
         }
 
@@ -572,7 +577,9 @@ public final class NetworkDiscovery {
         snap.totalFuelReserveEU += fuelEU;
         snap.generatorFuelProfile
                 .add(new Snapshot.GeneratorProfile(container,
-                        networkSideOutput(container, container.getAverageElectricOutput()), rated, fuelEU));
+                        networkSideOutput(container, container.getAverageElectricOutput()), rated, fuelEU,
+                        tankFluid != null ? tankFluid.getLocalizedName() : "",
+                        tankFluid != null ? tankFluid.amount : 0L));
         return true;
     }
 
