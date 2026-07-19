@@ -542,7 +542,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue chartWin = reg(syncManager, "pm_cw", () -> (long) b.getChartWindow());
         int[] winOpts = { 60, 300, 900, 1800, 3600 };
         String[] winNames = { "1m", "5m", "15m", "30m", "1h" };
-        Flow winRow = Flow.row().coverChildren();
+        Flow winRow = Flow.row().coverChildren().height(10);
         for (int i = 0; i < winOpts.length; i++) {
             final int sec = winOpts[i];
             final String nm = winNames[i];
@@ -550,8 +550,9 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                     .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
                     .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
                     .overlay(IKey.dynamic(
-                            () -> (chartWin.getLongValue() == sec ? "\u00a7f" : "\u00a78") + nm))
-                    .size(18, 9)
+                            () -> (chartWin.getLongValue() == sec ? "\u00a7f[" + nm + "]" : "\u00a78" + nm)))
+                    .size(26, 9)
+                    .marginRight(2)
                     .syncHandler(new InteractionSyncHandler().setOnMousePressed(md -> {
                         if (!md.isClient()) {
                             b.setChartWindow(sec);

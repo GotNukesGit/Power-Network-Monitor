@@ -957,10 +957,20 @@ public class PowerMonitorCoverBehavior {
         }
         // Per-fuel pool recording (internals + shared) into stable slots.
         {
-            // The chart plots EXACTLY the shared row's quantity (post
-            // fold-in liters) so legend and row can never disagree;
-            // generator internals live in the Full burn hover card.
+            // Shared fuels plot EXACTLY the row's quantity. Fuels with NO
+            // shared presence (internal-only, e.g. hand-filled diesels)
+            // chart their generators' internal sum instead -- otherwise
+            // they'd be invisible on the chart entirely.
             java.util.Map<String, Long> pools = new java.util.LinkedHashMap<>(lastSharedLitersByName);
+            java.util.Map<String, Long> internals = new java.util.LinkedHashMap<>();
+            for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
+                if (p.fuelName != null && !p.fuelName.isEmpty()) {
+                    internals.merge(displayFluidName(p.fuelName), p.fuelMb, Long::sum);
+                }
+            }
+            for (java.util.Map.Entry<String, Long> e : internals.entrySet()) {
+                pools.putIfAbsent(e.getKey(), e.getValue());
+            }
             for (java.util.Map.Entry<String, Long> e : pools.entrySet()) {
                 int slot = -1, free = -1;
                 for (int i = 0; i < 6; i++) {
