@@ -121,7 +121,8 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue supplyLines = reg(syncManager, "pm_supplylines", () -> (long) b.getSupplyLines());
         LongSyncValue secEmpty = reg(syncManager, "pm_secempty", b::getSecondsToEmpty);
         LongSyncValue secFull = reg(syncManager, "pm_secfull", b::getSecondsToFull);
-        LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getRunnableFuelEU); // gutter matches the runnable-basis series
+        LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getLimitingPoolEU); // gutter matches the limiting-pool series
+        StringSyncValue fuelTitle = regStr(syncManager, "pm_fueltitle", b::getFuelChartTitle);
         final net.minecraft.entity.player.EntityPlayer guiPlayer = data.getPlayer();
         dbgSync = new com.cleanroommc.modularui.value.sync.BooleanSyncValue(b::isDebugMode, v -> {});
         syncManager.syncValue("pm_dbg", dbgSync);
@@ -355,6 +356,8 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return line.isEmpty() ? "\u00a77Top draw: \u00a7fnone" : "\u00a77Top draw: \u00a7f" + line;
         });
         rowP(column, () -> cycles.getStringValue(), "cycles", b, guiPlayer);
+        StringSyncValue segLine = regStr(syncManager, "pm_segs", b::getSegmentLine);
+        rowP(column, () -> segLine.getStringValue(), "segments", b, guiPlayer);
         // Network-scope peaks (moved from the per-segment cable row).
         row(column, () -> {
             String s = "\u00a77Peak demand: \u00a7f" + fmt(peakDemand.getLongValue());
@@ -476,7 +479,8 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 .marginBottom(4));
         column.child(Flow.row().coverChildren()
                 .child(chartCell("Batteries (EU)", b::getChartBuffered, buf, false).marginRight(CHART_GAP))
-                .child(chartCell("Fuel reserve (EU)", b::getChartFuel, fuel, false)));
+                .child(chartCell(IKey.dynamic(() -> "\u00a7f" + fuelTitle.getStringValue()), b::getChartFuel, fuel,
+                        false)));
     }
 
     // --- layout helpers ---
@@ -550,6 +554,10 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
      * axis labels show true values, so the window's narrowness self-declares.
      */
     private Flow chartCell(String title, Supplier<List<Double>> series, LongSyncValue realtime, boolean zeroAnchored) {
+        return chartCell(IKey.str("\u00a7f" + title), series, realtime, zeroAnchored);
+    }
+
+    private Flow chartCell(IKey titleKey, Supplier<List<Double>> series, LongSyncValue realtime, boolean zeroAnchored) {
         GenericListSyncHandler<Double> handler = new GenericListSyncHandler<>(
                 series, null, PacketBuffer::readDouble, PacketBuffer::writeDouble, Double::equals, null);
         LineChartWidget chart = new LineChartWidget()
@@ -569,7 +577,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 .child(zeroAnchored ? IKey.str("\u00a780").asWidget().bottom(1).left(2)
                         : IKey.dynamic(() -> "\u00a78" + fmt(seriesMin(handler))).asWidget().bottom(1).left(2));
         return Flow.column().coverChildren()
-                .child(IKey.str("\u00a7f" + title).asWidget().marginBottom(1))
+                .child(titleKey.asWidget().marginBottom(1))
                 .child(Flow.row().coverChildren()
                         .child(plot)
                         .child(IKey.dynamic(() -> "\u00a7f" + fmt(realtime.getLongValue())).asWidget()

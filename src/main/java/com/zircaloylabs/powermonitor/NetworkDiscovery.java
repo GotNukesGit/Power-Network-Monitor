@@ -71,6 +71,8 @@ public final class NetworkDiscovery {
         public final List<IBasicEnergyContainer> members = new ArrayList<>();
         public boolean truncated = false; // hit maxTrackedNodes before finishing
         public int cablesVisited = 0; // diagnostic: how much of the network the BFS actually walked
+        /** Segment census: cable display name -> {count, mVoltage, mAmperage, lossPerMeter}. */
+        public final java.util.LinkedHashMap<String, long[]> cableCensus = new java.util.LinkedHashMap<>();
         public int supplyLines = 1; // 1 + number of foreign-hatch expansions (multi with N hatches on N lines)
 
         // Walk context retained so the network can be EXPANDED after
@@ -141,6 +143,10 @@ public final class NetworkDiscovery {
 
             if (currentMte instanceof MTECable) {
                 result.cablesVisited++;
+                MTECable seg = (MTECable) currentMte;
+                long[] agg = result.cableCensus.computeIfAbsent(localNameOf(current),
+                        k -> new long[] { 0, seg.mVoltage, seg.mAmperage, seg.mCableLossPerMeter });
+                agg[0]++;
                 truncated = walkCableSides(current, (MTECable) currentMte, result.visited, result.foundMembers, queue,
                         maxTrackedNodes);
             } else {
@@ -336,6 +342,11 @@ public final class NetworkDiscovery {
         /** Emission toll paid by fuel-less relays (buffers + transformers) -- real network loss. */
         public long relayOutputTollEUt = 0L;
 
+        /** Segment audit: one line per cable type; hazard line ("" when clean). */
+        public final List<String> segmentLines = new ArrayList<>();
+        public String segmentHazard = "";
+        public long maxEmitterVoltage = 0;
+
         /** Per-buffer provenance: "Name @ x,y,z : batteries X EU · tank Y/Z". */
         public final List<String> bufferLines = new ArrayList<>();
 
@@ -434,6 +445,11 @@ public final class NetworkDiscovery {
     }
 
     public static Snapshot summarize(List<IBasicEnergyContainer> members) {
+        return summarize(members, null);
+    }
+
+    public static Snapshot summarize(List<IBasicEnergyContainer> members,
+            java.util.LinkedHashMap<String, long[]> cableCensus) {
         Snapshot snap = new Snapshot();
         for (IBasicEnergyContainer container : members) {
             // Battery buffers: counted only toward buffer charge/capacity, excluded
@@ -477,6 +493,28 @@ public final class NetworkDiscovery {
                 snap.machineCount++;
                 accumulateDemand(snap, container);
             }
+        }
+        for (IBasicEnergyContainer m : members) {
+            if (m.getOutputVoltage() > 0) {
+                snap.maxEmitterVoltage = Math.max(snap.maxEmitterVoltage, m.getOutputVoltage());
+            }
+        }
+        if (cableCensus != null) {
+            StringBuilder hazard = new StringBuilder();
+            for (java.util.Map.Entry<String, long[]> e : cableCensus.entrySet()) {
+                long[] a = e.getValue();
+                boolean overvolted = snap.maxEmitterVoltage > a[1];
+                snap.segmentLines.add("\u00a77  " + a[0] + "x " + e.getKey() + ": \u00a7f" + a[1] + "V \u00b7 "
+                        + a[2] + "A \u00b7 loss " + a[3] + "/m"
+                        + (overvolted ? " \u00a7c\u26a0 rated below " + snap.maxEmitterVoltage + "V emitters"
+                                : ""));
+                if (overvolted && hazard.length() == 0) {
+                    hazard.append("\u00a7c\u26a0 ").append(a[0]).append("x ").append(e.getKey())
+                            .append(" rated ").append(a[1]).append("V on a ").append(snap.maxEmitterVoltage)
+                            .append("V network");
+                }
+            }
+            snap.segmentHazard = hazard.toString();
         }
         return snap;
     }

@@ -83,9 +83,15 @@ public class PowerMonitorCoverBehavior {
     private final java.util.IdentityHashMap<Object, String> producerRecipeName = new java.util.IdentityHashMap<>();
     private volatile java.util.List<String> lastProducersDiag = java.util.Collections.emptyList();
     private volatile java.util.List<String> lastLadderProv = java.util.Collections.emptyList();
+    private volatile java.util.List<String> frameGenContribs = java.util.Collections.emptyList();
+    private volatile java.util.List<String> frameSegmentLines = java.util.Collections.emptyList();
+    private volatile String frameSegmentHazard = "";
+    private volatile java.util.List<String> frameCyclesProv = java.util.Collections.emptyList();
     private volatile java.util.List<String> lastBufferLines = java.util.Collections.emptyList();
     private volatile java.util.List<String> lastSharedNames = java.util.Collections.emptyList();
     private volatile java.util.Map<String, Double> lastProductionEUt = java.util.Collections.emptyMap();
+    private volatile String lastLimitingFuel = "";
+    private volatile long lastLimitingPoolEU = -1L;
     private volatile long lastCyclesDemand = 0L;
     private volatile long lastCyclesSeconds = 0L;
     private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
@@ -489,7 +495,7 @@ public class PowerMonitorCoverBehavior {
         // rated capacity on the anchor line while meters saw the unified
         // network (field-observed: "2 gen ... 484 / 256 (189%)" from a
         // 4-generator, 2-line plant).
-        NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
+        NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members, discovery.cableCensus);
         long runnableEU = snap.totalFuelReserveEU + Math.max(0L, snap.totalBufferedEU - snap.internalBufferEU)
                 + lastConnectedReserveEU;
         NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(allControllers,
@@ -522,7 +528,9 @@ public class PowerMonitorCoverBehavior {
                 // that a fuel only limits if losing its generators drops
                 // capacity below this recipe's demand (surplus-capacity
                 // networks sail past a minor fuel's death).
-                Object[] pool = fuelPoolLimit(snap, st.demandEUt);
+                java.util.List<String> cp = new java.util.ArrayList<>();
+                Object[] pool = fuelPoolLimit(snap.generatorFuelProfile, st.demandEUt, cp);
+                frameCyclesProv = cp;
                 long cycles = energyCycles;
                 String limitNote = "";
                 String clock = "";
@@ -538,6 +546,27 @@ public class PowerMonitorCoverBehavior {
                     }
                 }
                 cl = "\u00a77" + st.name + ": \u00a7ffuel for ~" + cycles + " cycles" + clock + limitNote;
+                // The chart follows the killer: record the limiting fuel's
+                // whole pool (internals of its generators + shared reserves)
+                // so the plummeting line IS the fuel that ends the recipe.
+                if (pool != null) {
+                    String lf = (String) pool[1];
+                    long lpEU = 0;
+                    for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
+                        if (p.fuelName != null && displayFluidName(p.fuelName).equals(lf)) {
+                            lpEU += p.fuelEU;
+                        }
+                    }
+                    for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : lastSharedEUByFluid
+                            .entrySet()) {
+                        if (displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1)
+                                .getLocalizedName()).equals(lf)) {
+                            lpEU += e.getValue();
+                        }
+                    }
+                    lastLimitingFuel = lf;
+                    lastLimitingPoolEU = lpEU;
+                }
                 break;
             }
         }
@@ -551,11 +580,24 @@ public class PowerMonitorCoverBehavior {
         long rawGeneration = n > 0 ? accGen / n : snap.totalGenerationEUt;
         long rawBufIn = n > 0 ? accBufIn / n : snap.bufferInEUt;
         long rawBufOut = n > 0 ? accBufOut / n : snap.bufferOutEUt;
-        emaConsumption = ema(emaConsumption, rawConsumption);
-        emaGeneration = ema(emaGeneration, rawGeneration);
-        emaBufferIn = ema(emaBufferIn, rawBufIn);
-        emaBufferOut = ema(emaBufferOut, rawBufOut);
+        // MODEL v2: the second's averaged reading IS the value. No EMA
+        // layer -- GT's own per-tick averaging already killed the chatter,
+        // and stacked smoothing is where cross-line disagreement was born.
+        emaConsumption = rawConsumption;
+        emaGeneration = rawGeneration;
+        emaBufferIn = rawBufIn;
+        emaBufferOut = rawBufOut;
         liveGenerationEUt = emaGeneration;
+        {
+            java.util.List<String> gc = new java.util.ArrayList<>();
+            for (MeterTap tap : meterTaps) {
+                if (tap.isGenerator) {
+                    gc.add("\u00a77  " + NetworkDiscovery.localNameOf(tap.container) + ": \u00a7f"
+                            + Math.round(tap.container.getAverageElectricOutput() * tap.netFactor) + "\u00a77 EU/t");
+                }
+            }
+            frameGenContribs = gc;
+        }
         liveConsumptionEUt = emaConsumption;
         liveBufferedEU = snap.totalBufferedEU;
         liveBufferCapacityEU = snap.totalBufferCapacityEU;
@@ -567,6 +609,8 @@ public class PowerMonitorCoverBehavior {
         liveInMachineFuelMb = snap.inMachineFuelMb;
         lastGeneratorProfiles = snap.generatorFuelProfile;
         lastBufferLines = snap.bufferLines;
+        frameSegmentLines = snap.segmentLines;
+        frameSegmentHazard = snap.segmentHazard;
         liveStarvedCount = snap.starvedMachineCount;
         liveStarvedNames = snap.starvedNames;
         // Arming: a full minute of demand-present, nobody-starving operation.
@@ -717,19 +761,19 @@ public class PowerMonitorCoverBehavior {
 
         alertNearbyPlayers(hostTile, worldTime);
 
-        // Display smoothing: 5% deadband (min 2 EU/t step) on the noisiest
-        // readouts; zero always snaps immediately so an idle network reads 0.
-        shownDemandEUt = applyDeadband(shownDemandEUt, liveDemandEUt);
-        shownUnmetEUt = applyDeadband(shownUnmetEUt, liveUnmetEUt);
-        shownStorageFlowEUt = applyDeadband(shownStorageFlowEUt, emaBufferIn - emaBufferOut);
-        shownBufferInEUt = applyDeadband(shownBufferInEUt, emaBufferIn);
-        shownBufferOutEUt = applyDeadband(shownBufferOutEUt, emaBufferOut);
-        shownConsumptionEUt = applyDeadband(shownConsumptionEUt, emaConsumption);
-        shownGenerationEUt = applyDeadband(shownGenerationEUt, emaGeneration);
+        // MODEL v2: shown = frame value. Movement second-to-second is the
+        // network's real breathing (duty), not noise to suppress.
+        shownDemandEUt = liveDemandEUt;
+        shownUnmetEUt = liveUnmetEUt;
+        shownStorageFlowEUt = emaBufferIn - emaBufferOut;
+        shownBufferInEUt = emaBufferIn;
+        shownBufferOutEUt = emaBufferOut;
+        shownConsumptionEUt = emaConsumption;
+        shownGenerationEUt = emaGeneration;
         // Top draw: EMA keyed on the name -- resets instantly when the top
         // consumer CHANGES, smooths while it's the same machine.
         if (topConsumerName.equals(emaTopName)) {
-            emaTopDraw = ema(emaTopDraw, topConsumerEUt);
+            emaTopDraw = topConsumerEUt;
         } else {
             emaTopName = topConsumerName;
             emaTopDraw = topConsumerEUt;
@@ -810,25 +854,40 @@ public class PowerMonitorCoverBehavior {
             }
         }
         java.util.List<String> ladderProv = new java.util.ArrayList<>();
+        // MODEL v2: one reading per generator per frame feeds EVERYTHING;
+        // PRODUCTION-AWARE drains (a turbine fed by boilers doesn't die when
+        // its share runs out at raw burn -- field-convicted 16m-vs-50m).
+        java.util.Map<String, long[]> fluidCounts = new java.util.HashMap<>();
+        for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
+            if (p.fuelName != null && !p.fuelName.isEmpty()) {
+                fluidCounts.computeIfAbsent(p.fuelName, k -> new long[1])[0]++;
+            }
+        }
         java.util.List<long[]> smoothedProfile = new java.util.ArrayList<>(genN);
         for (int i = 0; i < genN; i++) {
             NetworkDiscovery.Snapshot.GeneratorProfile p = snap.generatorFuelProfile.get(i);
             Long avgAcc = accGenOut.get(p.source);
-            long rawOut = (avgAcc != null && meterSampleCount > 0) ? avgAcc / meterSampleCount : p.rawOutEUt;
-            long smoothOut = ema(genOutEma.getOrDefault(p.source, -1L), rawOut);
-            genOutEma.put(p.source, smoothOut);
-            long shownOut = applyDeadband(genOutShown.getOrDefault(p.source, 0L), smoothOut);
-            genOutShown.put(p.source, shownOut);
+            long shownOut = (avgAcc != null && meterSampleCount > 0) ? avgAcc / meterSampleCount : p.rawOutEUt;
+            long prodSlice = 0;
+            if (p.fuelName != null && fluidCounts.containsKey(p.fuelName)) {
+                prodSlice = Math.round(lastProductionEUt.getOrDefault(displayFluidName(p.fuelName), 0.0)
+                        / fluidCounts.get(p.fuelName)[0]);
+            }
             smoothedProfile.add(new long[] { shownOut, p.ratedEUt, p.fuelEU + sharedByGenRated[i],
-                    p.fuelEU + sharedByGenCurrent[i] });
-            long fullRunway = p.ratedEUt > 0 ? (p.fuelEU + sharedByGenRated[i]) / (p.ratedEUt * 20L) : 0;
-            long curRunway = shownOut > 0 ? (p.fuelEU + sharedByGenCurrent[i]) / (shownOut * 20L) : 0;
+                    p.fuelEU + sharedByGenCurrent[i], prodSlice });
+            long fullDrain = p.ratedEUt - prodSlice;
+            long curDrain = shownOut - prodSlice;
+            long fullRunway = fullDrain > 0 ? (p.fuelEU + sharedByGenRated[i]) / (fullDrain * 20L) : -1;
+            long curRunway = curDrain > 0 ? (p.fuelEU + sharedByGenCurrent[i]) / (curDrain * 20L) : -1;
             ladderProv.add("\u00a77" + NetworkDiscovery.localNameOf(p.source) + ": rated \u00a7f" + p.ratedEUt
                     + "\u00a77 cur \u00a7f" + shownOut + "\u00a77 \u00b7 internal \u00a7f" + p.fuelEU
                     + "\u00a77 EU + share \u00a7f" + sharedByGenRated[i] + "\u00a77(full)/\u00a7f"
                     + sharedByGenCurrent[i] + "\u00a77(cur) \u00b7 runway \u00a7f"
-                    + PowerMonitorCover.formatSeconds(fullRunway) + "\u00a77(full)/\u00a7f"
-                    + (shownOut > 0 ? PowerMonitorCover.formatSeconds(curRunway) : "idle") + "\u00a77(cur)");
+                    + (fullRunway < 0 ? "self-sustaining" : PowerMonitorCover.formatSeconds(fullRunway))
+                    + "\u00a77(full)/\u00a7f"
+                    + (shownOut <= 0 ? "idle"
+                            : curRunway < 0 ? "self-sustaining" : PowerMonitorCover.formatSeconds(curRunway))
+                    + "\u00a77(cur)");
         }
         lastLadderProv = ladderProv;
         emaFuelReserve = ema(emaFuelReserve, snap.totalFuelReserveEU);
@@ -868,10 +927,9 @@ public class PowerMonitorCoverBehavior {
             genFuelRows = rows.toArray(new String[0]);
         }
         fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true, -1L);
-        // Header rate = the same network-level smoothed figure POWER shows:
-        // one number, one truth. (Sum-of-per-gen-deadbands hops a few EU/t
-        // every second; the rungs still use per-gen rates -- they must.)
-        fuelScheduleCurrent = buildFuelSchedule(smoothedProfile, false, shownGenerationEUt);
+        // MODEL v2: no override needed -- the per-gen readings sum to the
+        // POWER figure by construction (one accumulation, one frame).
+        fuelScheduleCurrent = buildFuelSchedule(smoothedProfile, false, -1L);
         // Per-generator internal reserves: EACH generator, its own fuel, its
         // own runway at rated burn (operator-specified layout -- the unified
         // ladder is the network view, these are the machines).
@@ -894,7 +952,7 @@ public class PowerMonitorCoverBehavior {
         if (history != null) {
             history.record(rawConsumption, rawGeneration, liveDemandEUt,
                     Math.max(0L, liveBufferedEU - liveInternalEU), // BATTERIES only: the structural quantity
-                    liveFuelReserveEU + lastConnectedReserveEU, // RUNNABLE basis: in-machine + connected
+                    getLimitingPoolEU(), // the LIMITING fuel's pool -- the line that kills you
                     worldTime);
             java.util.List<Double> cons = new java.util.ArrayList<>(CHART_MAX_POINTS);
             java.util.List<Double> gen = new java.util.ArrayList<>(CHART_MAX_POINTS);
@@ -1547,9 +1605,28 @@ public class PowerMonitorCoverBehavior {
         return Math.max(0L, liveBufferedEU - liveInternalEU);
     }
 
-    /** In-machine + connected reserves -- the quantity the Fuel chart plots. */
+    /** In-machine + connected reserves (runnable basis). */
     public long getRunnableFuelEU() {
         return liveFuelReserveEU + lastConnectedReserveEU;
+    }
+
+    /** The fuel chart's quantity: the LIMITING fuel's pool, sticky; runnable total before any verdict. */
+    public long getLimitingPoolEU() {
+        return lastLimitingPoolEU >= 0 ? lastLimitingPoolEU : getRunnableFuelEU();
+    }
+
+    public String getFuelChartTitle() {
+        return lastLimitingFuel.isEmpty() ? "Fuel reserve (EU)" : "Fuel: " + lastLimitingFuel + " (EU)";
+    }
+
+    /** Segment audit panel line: the hazard if one exists, else a clean tally. */
+    public String getSegmentLine() {
+        if (!frameSegmentHazard.isEmpty()) {
+            return frameSegmentHazard;
+        }
+        int types = frameSegmentLines.size();
+        return types == 0 ? "" : "\u00a77Segments: \u00a7f" + types + " cable type" + (types == 1 ? "" : "s")
+                + " \u00a7a\u2713 rated for this network";
     }
 
     public String getCyclesLine() {
@@ -1571,13 +1648,8 @@ public class PowerMonitorCoverBehavior {
             for (String l : lastDemandLines) {
                 out.add("\u00a77  " + l);
             }
-            out.add("\u00a77Generator contributions (network-side):");
-            for (MeterTap tap : meterTaps) {
-                if (tap.isGenerator) {
-                    out.add("\u00a77  " + NetworkDiscovery.localNameOf(tap.container) + ": \u00a7f"
-                            + Math.round(tap.container.getAverageElectricOutput() * tap.netFactor) + "\u00a77 EU/t");
-                }
-            }
+            out.add("\u00a77Generator contributions (network-side, same capture as the panel):");
+            out.addAll(frameGenContribs);
         } else if ("loss".equals(key)) {
             out.add("\u00a77loss = generation \u2212 delivered \u2212 \u0394storage");
             out.add("\u00a77relay output toll: \u00a7f" + liveRelayTollEUt + "\u00a77 EU/t (buffers+transformers)");
@@ -1619,12 +1691,13 @@ public class PowerMonitorCoverBehavior {
                     }
                 }
             }
+        } else if ("segments".equals(key)) {
+            out.add("\u00a77Cable segments (walk census, ratings vs max emitter voltage):");
+            out.addAll(frameSegmentLines);
         } else if ("cycles".equals(key)) {
             out.add("\u00a77demand \u00a7f" + lastCyclesDemand + "\u00a77 EU/t \u00b7 cycle \u00a7f"
-                    + lastCyclesSeconds + "\u00a77s");
-            java.util.List<String> pool = new java.util.ArrayList<>();
-            fuelPoolLimit(lastGeneratorProfiles, lastCyclesDemand, pool);
-            out.addAll(pool);
+                    + lastCyclesSeconds + "\u00a77s \u00a78(same computation as the panel line)");
+            out.addAll(frameCyclesProv);
         }
         return out;
     }
@@ -1731,14 +1804,19 @@ public class PowerMonitorCoverBehavior {
         java.util.List<double[]> items = new java.util.ArrayList<>(); // {rateEUt, secondsUntilDry}
         for (long[] p : profile) {
             long rate = fullBurn ? p[1] : p[0];
-            // Basis-matched augmented fuel: [2] = internal + rated-split
-            // share of shared reserves, [3] = internal + current-usage
-            // split. Shares are THIS NETWORK's members only.
+            // Basis-matched augmented fuel ([2] rated-split, [3] usage-split
+            // shares, this network only); drain = rate minus the gen's slice
+            // of modeled production ([4]) -- a production-covered generator
+            // never dies and sets no rung.
             long fuel = fullBurn ? p[2] : p[3];
+            long drain = rate - (p.length > 4 ? p[4] : 0);
             if (rate <= 0 || fuel <= 0) {
                 continue; // idle or fuel-less generator contributes nothing to the fueled schedule
             }
-            items.add(new double[] { rate, fuel / (rate * 20.0) });
+            if (drain <= 0) {
+                continue; // self-sustaining at current production: no death, no rung
+            }
+            items.add(new double[] { rate, fuel / (drain * 20.0) });
         }
         if (items.isEmpty()) {
             return "";
