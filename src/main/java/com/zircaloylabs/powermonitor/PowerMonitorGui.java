@@ -482,16 +482,16 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
 
         // ===== PANEL v2: one large multi-series chart + toggle legend =====
         MultiChartWidget chart = new MultiChartWidget();
-        chart.add(new MultiChartWidget.Series("Demand", 0x55FF55, "EU/t", listSync(syncManager, "mc_dem", b::getChartDemand)));
-        chart.add(new MultiChartWidget.Series("Generation", 0x55FFFF, "EU/t", listSync(syncManager, "mc_gen", b::getChartGeneration)));
-        chart.add(new MultiChartWidget.Series("Batteries", 0xFFAA00, "EU", listSync(syncManager, "mc_bat", b::getChartBuffered)));
+        chart.add(new MultiChartWidget.Series("Demand", 0x55FF55, "EU/t", listSync(syncManager, "mc_dem", b::getChartDemandW)));
+        chart.add(new MultiChartWidget.Series("Generation", 0x55FFFF, "EU/t", listSync(syncManager, "mc_gen", b::getChartGenW)));
+        chart.add(new MultiChartWidget.Series("Batteries", 0xFFAA00, "EU", listSync(syncManager, "mc_bat", b::getChartBatW)));
         int[] fuelColors = { 0xAA66DD, 0x66DDAA, 0xDDDD66, 0xDD66AA, 0x66AADD, 0xAADD66 };
         StringSyncValue[] poolNames = new StringSyncValue[6];
         for (int i = 0; i < 6; i++) {
             final int slot = i;
             poolNames[i] = regStr(syncManager, "mc_fpn" + i, () -> b.getFuelPoolName(slot));
             chart.add(new MultiChartWidget.Series("", fuelColors[i], "L",
-                    listSync(syncManager, "mc_fp" + i, () -> b.getFuelPoolSeries(slot))));
+                    listSync(syncManager, "mc_fp" + i, () -> b.getFuelPoolSeriesW(slot))));
         }
         chart.size(CHART_WIDTH * 2 + CHART_GAP - 26, 80);
         Flow legend = Flow.column().coverChildren();
@@ -509,7 +509,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                         String dot = chart.isEnabled(idx) ? "\u25a0 " : "\u25a1 ";
                         return colorHex(ser.color) + dot + "\u00a77" + nm + " \u00a7f"
                                 + compact(chart.liveOf(idx));
-                    }))
+                    }).alignment(com.cleanroommc.modularui.utils.Alignment.CenterLeft))
                     .size(102, 9)
                     .marginBottom(1)
                     .onUpdateListener(w -> {
@@ -539,6 +539,45 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         column.child(Flow.row().coverChildren()
                 .child(chart.marginRight(4))
                 .child(legend));
+        LongSyncValue chartWin = reg(syncManager, "pm_cw", () -> (long) b.getChartWindow());
+        int[] winOpts = { 60, 300, 900, 1800, 3600 };
+        String[] winNames = { "1m", "5m", "15m", "30m", "1h" };
+        Flow winRow = Flow.row().coverChildren();
+        for (int i = 0; i < winOpts.length; i++) {
+            final int sec = winOpts[i];
+            final String nm = winNames[i];
+            winRow.child(new ButtonWidget<>()
+                    .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
+                    .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
+                    .overlay(IKey.dynamic(
+                            () -> (chartWin.getLongValue() == sec ? "\u00a7f" : "\u00a78") + nm))
+                    .size(18, 9)
+                    .syncHandler(new InteractionSyncHandler().setOnMousePressed(md -> {
+                        if (!md.isClient()) {
+                            b.setChartWindow(sec);
+                        }
+                    })));
+        }
+        column.child(winRow.marginTop(1));
+        int[] windows = { 60, 300, 900, 1800, 3600 };
+        String[] windowNames = { "1m", "5m", "15m", "30m", "1h" };
+        Flow tsRow = Flow.row().coverChildren().marginTop(1);
+        for (int i = 0; i < windows.length; i++) {
+            final int wsec = windows[i];
+            final String wname = windowNames[i];
+            tsRow.child(new ButtonWidget<>()
+                    .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
+                    .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
+                    .overlay(IKey.dynamic(
+                            () -> chart.getWindow() == wsec ? "\u00a7f[" + wname + "]" : "\u00a78 " + wname + " "))
+                    .size(24, 9)
+                    .syncHandler(new InteractionSyncHandler().setOnMousePressed(md -> {
+                        if (md.isClient()) {
+                            chart.setWindow(wsec);
+                        }
+                    })));
+        }
+        column.child(tsRow);
     }
 
     // --- layout helpers ---

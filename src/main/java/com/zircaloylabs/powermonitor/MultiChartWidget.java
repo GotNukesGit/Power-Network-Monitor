@@ -40,9 +40,19 @@ public class MultiChartWidget extends Widget<MultiChartWidget> implements Intera
     }
 
     private final List<Series> series = new ArrayList<>();
+    /** Visible window in points (1 point = 1s for fuel series). Client display state. */
+    private int windowSeconds = 300;
     /** -1 = none; set by trace proximity or legend hover (client-side only). */
     private int hovered = -1;
     private int legendHover = -1;
+
+    public int getWindow() {
+        return windowSeconds;
+    }
+
+    public void setWindow(int seconds) {
+        this.windowSeconds = seconds;
+    }
 
     public MultiChartWidget add(Series s) {
         series.add(s);
@@ -96,9 +106,35 @@ public class MultiChartWidget extends Widget<MultiChartWidget> implements Intera
             if (!s.enabled) {
                 continue;
             }
-            List<Double> d = s.data.getValue();
-            if (d == null || d.size() < 2) {
+            List<Double> full = s.data.getValue();
+            if (full == null || full.size() < 2) {
                 continue;
+            }
+            // Timescale slice: last windowSeconds points, then min-max
+            // bucketed to plot width so spikes survive the squeeze.
+            List<Double> sliced = full.size() > windowSeconds
+                    ? full.subList(full.size() - windowSeconds, full.size())
+                    : full;
+            List<Double> d;
+            if (sliced.size() > w) {
+                d = new ArrayList<>(w * 2);
+                int buckets = Math.max(1, w);
+                for (int bkt = 0; bkt < buckets; bkt++) {
+                    int a = bkt * sliced.size() / buckets;
+                    int z = Math.max(a + 1, (bkt + 1) * sliced.size() / buckets);
+                    double bmn = Double.MAX_VALUE, bmx = -Double.MAX_VALUE;
+                    for (int k = a; k < z && k < sliced.size(); k++) {
+                        Double v = sliced.get(k);
+                        if (v != null) {
+                            bmn = Math.min(bmn, v);
+                            bmx = Math.max(bmx, v);
+                        }
+                    }
+                    d.add(bmn == Double.MAX_VALUE ? null : bmn);
+                    d.add(bmx == -Double.MAX_VALUE ? null : bmx);
+                }
+            } else {
+                d = sliced;
             }
             double mn = Double.MAX_VALUE, mxv = -Double.MAX_VALUE;
             for (Double v : d) {

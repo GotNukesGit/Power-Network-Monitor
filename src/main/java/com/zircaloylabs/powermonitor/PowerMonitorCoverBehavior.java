@@ -102,6 +102,13 @@ public class PowerMonitorCoverBehavior {
     private volatile java.util.Map<String, Long> lastSharedLitersByName = java.util.Collections.emptyMap();
     /** 10s ledger window: per-frame {generation, delivered, absorbed} for exact windowed loss accounting. */
     private final java.util.ArrayDeque<long[]> lossWindow = new java.util.ArrayDeque<>();
+    private final java.util.List<Double> deepDemand = java.util.Collections
+            .synchronizedList(new java.util.ArrayList<>());
+    private final java.util.List<Double> deepGen = java.util.Collections
+            .synchronizedList(new java.util.ArrayList<>());
+    private final java.util.List<Double> deepBat = java.util.Collections
+            .synchronizedList(new java.util.ArrayList<>());
+    private volatile int chartWindowSeconds = 300;
     private volatile String lastLimitingFuel = "";
     private volatile long lastLimitingPoolEU = -1L;
     private volatile long lastCyclesDemand = 0L;
@@ -950,16 +957,10 @@ public class PowerMonitorCoverBehavior {
         }
         // Per-fuel pool recording (internals + shared) into stable slots.
         {
-            // LITERS, not EU-equivalent -- the operator thinks in tank volumes.
-            java.util.Map<String, Long> pools = new java.util.LinkedHashMap<>();
-            for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
-                if (p.fuelName != null && !p.fuelName.isEmpty()) {
-                    pools.merge(displayFluidName(p.fuelName), p.fuelMb, Long::sum);
-                }
-            }
-            for (java.util.Map.Entry<String, Long> e : lastSharedLitersByName.entrySet()) {
-                pools.merge(e.getKey(), e.getValue(), Long::sum);
-            }
+            // The chart plots EXACTLY the shared row's quantity (post
+            // fold-in liters) so legend and row can never disagree;
+            // generator internals live in the Full burn hover card.
+            java.util.Map<String, Long> pools = new java.util.LinkedHashMap<>(lastSharedLitersByName);
             for (java.util.Map.Entry<String, Long> e : pools.entrySet()) {
                 int slot = -1, free = -1;
                 for (int i = 0; i < 6; i++) {
@@ -978,10 +979,18 @@ public class PowerMonitorCoverBehavior {
                 if (slot >= 0) {
                     java.util.List<Double> hist = fuelPoolSlotHistory[slot];
                     hist.add((double) e.getValue());
-                    while (hist.size() > 96) {
+                    while (hist.size() > 3600) {
                         hist.remove(0);
                     }
                 }
+            }
+        }
+        deepDemand.add((double) liveDemandEUt);
+        deepGen.add((double) emaGeneration);
+        deepBat.add((double) getBatteryOnlyEU());
+        for (java.util.List<Double> dq : new java.util.List[] { deepDemand, deepGen, deepBat }) {
+            while (dq.size() > 3600) {
+                dq.remove(0);
             }
         }
         fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true, -1L);
@@ -1253,21 +1262,8 @@ public class PowerMonitorCoverBehavior {
         FluidReserves.Result scan = FluidReserves.scan(lastMembers, RESERVE_MAX_PIPES);
         lastConnectedReserveEU = scan.totalReserveEU;
         lastSharedEUByFluid = scan.euByFluid;
-        {
-            java.util.Map<String, Long> sl = new java.util.HashMap<>();
-            for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : scan.litersByFluid.entrySet()) {
-                sl.merge(displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1)
-                        .getLocalizedName()), e.getValue(), Long::sum);
-            }
-            lastSharedLitersByName = sl;
-        }
         // Producers: any multiblock whose output hatch the fluid walk
         // counted, currently running a recipe with fluid outputs.
-        // Visited coke hatches are serving windows: the creosote lives in
-        // the OVENS behind them (private capped tank, not pipe-facing).
-        // Pull nearby ovens' internal brew into the reserve totals so the
-        // liters and EU reflect what actually exists.
-        java.util.Map<net.minecraftforge.fluids.Fluid, Long> ovenInternals = new java.util.HashMap<>();
         java.util.Map<String, Double> modeledProduction = new java.util.HashMap<>();
         java.util.List<String> producersDiag = new java.util.ArrayList<>();
         // The reworked coke oven outputs through its OWN hatch type with a
@@ -1310,13 +1306,6 @@ public class PowerMonitorCoverBehavior {
                     if (Math.abs(hc[0] - cx) + Math.abs(hc[1] - cy) + Math.abs(hc[2] - cz) <= 6) {
                         scoped = true;
                         break;
-                    }
-                }
-                if (scoped) {
-                    net.minecraftforge.fluids.FluidStack brew = ((gregtech.common.tileentities.machines.multi.MTECokeOven) c)
-                            .getFluid();
-                    if (brew != null && brew.amount > 0 && brew.getFluid() != null) {
-                        ovenInternals.merge(brew.getFluid(), (long) brew.amount, Long::sum);
                     }
                 }
             }
@@ -1426,6 +1415,16 @@ public class PowerMonitorCoverBehavior {
             }
         }
         java.util.Map<String, Double> modeledNet = netMap;
+        {
+            // Captured AFTER the oven-internals fold-in: the chart's pool
+            // series and the shared row read the SAME litersByFluid.
+            java.util.Map<String, Long> sl = new java.util.HashMap<>();
+            for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e2 : scan.litersByFluid.entrySet()) {
+                sl.merge(displayFluidName(new net.minecraftforge.fluids.FluidStack(e2.getKey(), 1)
+                        .getLocalizedName()), e2.getValue(), Long::sum);
+            }
+            lastSharedLitersByName = sl;
+        }
         // Production in EU/t per fluid (display name): rate L/s x EU-per-L / 20.
         java.util.Map<String, Double> prodEUt = new java.util.HashMap<>();
         for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : scan.euByFluid.entrySet()) {
@@ -1440,16 +1439,6 @@ public class PowerMonitorCoverBehavior {
             }
         }
         lastProductionEUt = prodEUt;
-        // Fold oven internals into the shared totals and EU estimate.
-        for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : ovenInternals.entrySet()) {
-            scan.litersByFluid.merge(e.getKey(), e.getValue(), Long::sum);
-            Long euPer = scan.euByFluid.get(e.getKey());
-            if (euPer != null && scan.litersByFluid.get(e.getKey()) > e.getValue()) {
-                long addEU = (long) (euPer * (e.getValue() / (double) (scan.litersByFluid.get(e.getKey()) - e.getValue())));
-                scan.euByFluid.merge(e.getKey(), addEU, Long::sum);
-                lastConnectedReserveEU += addEU;
-            }
-        }
         java.util.List<String> rd = new java.util.ArrayList<>(scan.tankLines);
         rd.add(0, "\u00a77Fluid walk: \u00a7f" + scan.pipesVisited + "\u00a77 pipes, \u00a7f" + scan.tankLines.size()
                 + "\u00a77 tanks" + (scan.truncated ? " \u00a78(truncated)" : ""));
@@ -1691,6 +1680,54 @@ public class PowerMonitorCoverBehavior {
             return frameSegmentHazard;
         }
         return ""; // clean segments are SILENT -- absence of warning is the message; census lives in the ? and diag
+    }
+
+    public void setChartWindow(int seconds) {
+        chartWindowSeconds = Math.max(60, Math.min(3600, seconds));
+    }
+
+    public int getChartWindow() {
+        return chartWindowSeconds;
+    }
+
+    /** Last window-seconds of a 1Hz series, min-max downsampled to <=200 points (spikes survive). */
+    private java.util.List<Double> windowed(java.util.List<Double> src) {
+        java.util.List<Double> c;
+        synchronized (src) {
+            int from = Math.max(0, src.size() - chartWindowSeconds);
+            c = new java.util.ArrayList<>(src.subList(from, src.size()));
+        }
+        if (c.size() <= 200) {
+            return c;
+        }
+        int bucket = (int) Math.ceil(c.size() / 100.0);
+        java.util.List<Double> out = new java.util.ArrayList<>(210);
+        for (int i = 0; i < c.size(); i += bucket) {
+            double mn = Double.MAX_VALUE, mx = -Double.MAX_VALUE;
+            for (int j = i; j < Math.min(c.size(), i + bucket); j++) {
+                mn = Math.min(mn, c.get(j));
+                mx = Math.max(mx, c.get(j));
+            }
+            out.add(mn);
+            out.add(mx);
+        }
+        return out;
+    }
+
+    public java.util.List<Double> getChartDemandW() {
+        return windowed(deepDemand);
+    }
+
+    public java.util.List<Double> getChartGenW() {
+        return windowed(deepGen);
+    }
+
+    public java.util.List<Double> getChartBatW() {
+        return windowed(deepBat);
+    }
+
+    public java.util.List<Double> getFuelPoolSeriesW(int slot) {
+        return windowed(fuelPoolSlotHistory[slot]);
     }
 
     public java.util.List<Double> getFuelPoolSeries(int slot) {
