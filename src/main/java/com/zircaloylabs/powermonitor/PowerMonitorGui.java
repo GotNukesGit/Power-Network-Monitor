@@ -122,6 +122,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue secEmpty = reg(syncManager, "pm_secempty", b::getSecondsToEmpty);
         LongSyncValue secFull = reg(syncManager, "pm_secfull", b::getSecondsToFull);
         LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getRunnableFuelEU); // gutter matches the runnable-basis series
+        final net.minecraft.entity.player.EntityPlayer guiPlayer = data.getPlayer();
         LongSyncValue cable = reg(syncManager, "pm_cable", b::getAnchorThroughputEUt);
         LongSyncValue lineLoss = reg(syncManager, "pm_lineloss", b::getLineLossEUt);
         LongSyncValue peakDemand = reg(syncManager, "pm_peakdemand", b::getPeakDemandEUt);
@@ -168,7 +169,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 "\u00a77transformers have no fuel, so their toll drains \u00a7fstorage\u00a77 --",
                 "\u00a77shown here as Output loss. Every relay stage costs ~3%.");
 
-        row(column, () -> {
+        rowP(column, () -> {
             long d = demand.getLongValue();
             long delivered = cons.getLongValue();
             long u = unmet.getLongValue();
@@ -179,7 +180,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 s += "   \u00a7c\u26a0 Unmet: " + fmt(u);
             }
             return s;
-        });
+        }, "power", b, guiPlayer);
 
         row(column, () -> {
             long g = gen.getLongValue();
@@ -206,7 +207,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return s;
         });
 
-        row(column, () -> {
+        rowP(column, () -> {
             long loss = lineLoss.getLongValue();
             long g = gen.getLongValue();
             if (loss <= 0 || g <= 0) {
@@ -228,7 +229,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 s += " \u00b7 Output loss: " + c + "~" + fmt(toll) + " EU/t" + amps(toll, v) + "\u00a77";
             }
             return s + " (" + c + pctText + "%\u00a77)";
-        });
+        }, "loss", b, guiPlayer);
 
         divider(column);
 
@@ -240,7 +241,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 "\u00a77Buffers idle between ~1/3 and ~2/3 internal charge",
                 "\u00a77by design, so small flows there are normal.");
 
-        row(column, () -> {
+        rowP(column, () -> {
             long cap = bufCap.getLongValue();
             if (cap <= 0) {
                 return "\u00a7fNo storage on network";
@@ -258,7 +259,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 s += "  \u00a7a~" + PowerMonitorCover.formatSeconds(f) + " to full";
             }
             return s;
-        });
+        }, "charge", b, guiPlayer);
 
         // Gross both-direction flow: net alone hides a series buffer doing
         // all the work (100 in / 100 out nets to "idle" while every joule
@@ -298,33 +299,33 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 "\u00a77capacity steps down: \u00a7f128\u21921h05m\u00a77 means \u00a7f128 EU/t",
                 "\u00a7funtil 1h05m\u00a77, then the next step takes over.");
 
-        row(column, () -> {
+        rowP(column, () -> {
             if (fuel.getLongValue() <= 0) {
                 return maxGen.getLongValue() > 0 ? "\u00a7eNo fuel in generator tanks/slots"
                         : "\u00a7fNo generators on network";
             }
             String sched = schedFull.getStringValue();
             return "\u00a77Full burn:  " + (sched.isEmpty() ? "\u00a7fn/a" : "\u00a7f" + sched);
-        });
+        }, "ladder", b, guiPlayer);
 
-        row(column, () -> {
+        rowP(column, () -> {
             if (fuel.getLongValue() <= 0) {
                 return "";
             }
             String sched = schedCur.getStringValue();
             return sched.isEmpty() ? "\u00a77Current:    \u00a7fgenerators idle" : "\u00a77Current:    \u00a7f" + sched;
-        });
+        }, "ladder", b, guiPlayer);
 
         // Connected reserves: tanks + pipes on the generators' plumbing.
         // In-machine fuel above is GUARANTEED runway; these lines assume the
         // plumbing keeps delivering -- and each reserve's measured trend
         // announces whether production is keeping it charged.
-        row(column, () -> res0.getStringValue());
-        row(column, () -> res1.getStringValue());
-        row(column, () -> res2.getStringValue());
-        row(column, () -> res3.getStringValue());
-        row(column, () -> res4.getStringValue());
-        row(column, () -> res5.getStringValue());
+        rowP(column, () -> res0.getStringValue(), "fuel:0", b, guiPlayer);
+        rowP(column, () -> res1.getStringValue(), "fuel:1", b, guiPlayer);
+        rowP(column, () -> res2.getStringValue(), "fuel:2", b, guiPlayer);
+        rowP(column, () -> res3.getStringValue(), "fuel:3", b, guiPlayer);
+        rowP(column, () -> res4.getStringValue(), "fuel:4", b, guiPlayer);
+        rowP(column, () -> res5.getStringValue(), "fuel:5", b, guiPlayer);
 
         divider(column);
 
@@ -351,7 +352,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             String line = top0.getStringValue();
             return line.isEmpty() ? "\u00a77Top draw: \u00a7fnone" : "\u00a77Top draw: \u00a7f" + line;
         });
-        row(column, () -> cycles.getStringValue());
+        rowP(column, () -> cycles.getStringValue(), "cycles", b, guiPlayer);
         // Network-scope peaks (moved from the per-segment cable row).
         row(column, () -> {
             String s = "\u00a77Peak demand: \u00a7f" + fmt(peakDemand.getLongValue());
@@ -419,7 +420,6 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         // unless the item opts out, so the sneak gesture's delivery depends
         // on GT tool internals -- a GUI button cannot be eaten by vanilla
         // sneak semantics.
-        final net.minecraft.entity.player.EntityPlayer guiPlayer = data.getPlayer();
         column.child(Flow.row().coverChildren()
                 .child(new ButtonWidget<>()
                         .overlay(IKey.str("\u00a7fack"))
@@ -480,6 +480,25 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
 
     private void row(Flow column, Supplier<String> text) {
         column.child(IKey.dynamic(text::get).asWidget().marginBottom(2));
+    }
+
+    /** Row with a per-line provenance button: click prints THIS row's math to chat. */
+    private void rowP(Flow column, Supplier<String> text, String provKey, PowerMonitorCoverBehavior b,
+            net.minecraft.entity.player.EntityPlayer player) {
+        column.child(Flow.row().coverChildren().marginBottom(2)
+                .child(IKey.dynamic(text::get).asWidget())
+                .child(new ButtonWidget<>()
+                        .overlay(IKey.str("\u00a78?"))
+                        .size(7, 9)
+                        .marginLeft(3)
+                        .tooltipStatic(t -> t.addLine("\u00a77Show this row's math in chat"))
+                        .syncHandler(new InteractionSyncHandler().setOnMousePressed(mouseData -> {
+                            if (!mouseData.isClient() && player != null) {
+                                for (String line : b.buildProvenance(provKey)) {
+                                    player.addChatMessage(new net.minecraft.util.ChatComponentText(line));
+                                }
+                            }
+                        }))));
     }
 
     private void divider(Flow column) {

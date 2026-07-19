@@ -73,6 +73,11 @@ public class PowerMonitorCoverBehavior {
     private final java.util.IdentityHashMap<Object, java.util.Map<String, double[]>> producerRateMemory = new java.util.IdentityHashMap<>();
     private final java.util.IdentityHashMap<Object, String> producerRecipeName = new java.util.IdentityHashMap<>();
     private volatile java.util.List<String> lastProducersDiag = java.util.Collections.emptyList();
+    private volatile java.util.List<String> lastLadderProv = java.util.Collections.emptyList();
+    private volatile java.util.List<String> lastBufferLines = java.util.Collections.emptyList();
+    private volatile java.util.List<String> lastSharedNames = java.util.Collections.emptyList();
+    private volatile long lastCyclesDemand = 0L;
+    private volatile long lastCyclesSeconds = 0L;
     private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
     private volatile String[] sharedFuelRows = new String[0]; // connected pipe/tank pools, 10 s
     private volatile String cyclesLine = "";
@@ -498,6 +503,8 @@ public class PowerMonitorCoverBehavior {
                 }
                 long energyCycles = runnableEU / perCycle;
                 long cycleSeconds = Math.max(1, st.controller.mMaxProgresstime / 20);
+                lastCyclesDemand = st.demandEUt;
+                lastCyclesSeconds = cycleSeconds;
                 // Operator's fuel-pool model: per fuel, ONE pool (internal
                 // tanks + shared reserves feeding them) drained at the
                 // combined current burn rate of every generator on it.
@@ -547,6 +554,7 @@ public class PowerMonitorCoverBehavior {
         liveRelayTollEUt = snap.relayOutputTollEUt;
         liveInMachineFuelMb = snap.inMachineFuelMb;
         lastGeneratorProfiles = snap.generatorFuelProfile;
+        lastBufferLines = snap.bufferLines;
         liveStarvedCount = snap.starvedMachineCount;
         liveStarvedNames = snap.starvedNames;
         // Arming: a full minute of demand-present, nobody-starving operation.
@@ -784,6 +792,7 @@ public class PowerMonitorCoverBehavior {
                 }
             }
         }
+        java.util.List<String> ladderProv = new java.util.ArrayList<>();
         java.util.List<long[]> smoothedProfile = new java.util.ArrayList<>(genN);
         for (int i = 0; i < genN; i++) {
             NetworkDiscovery.Snapshot.GeneratorProfile p = snap.generatorFuelProfile.get(i);
@@ -795,7 +804,16 @@ public class PowerMonitorCoverBehavior {
             genOutShown.put(p.source, shownOut);
             smoothedProfile.add(new long[] { shownOut, p.ratedEUt, p.fuelEU + sharedByGenRated[i],
                     p.fuelEU + sharedByGenCurrent[i] });
+            long fullRunway = p.ratedEUt > 0 ? (p.fuelEU + sharedByGenRated[i]) / (p.ratedEUt * 20L) : 0;
+            long curRunway = shownOut > 0 ? (p.fuelEU + sharedByGenCurrent[i]) / (shownOut * 20L) : 0;
+            ladderProv.add("\u00a77" + NetworkDiscovery.localNameOf(p.source) + ": rated \u00a7f" + p.ratedEUt
+                    + "\u00a77 cur \u00a7f" + shownOut + "\u00a77 \u00b7 internal \u00a7f" + p.fuelEU
+                    + "\u00a77 EU + share \u00a7f" + sharedByGenRated[i] + "\u00a77(full)/\u00a7f"
+                    + sharedByGenCurrent[i] + "\u00a77(cur) \u00b7 runway \u00a7f"
+                    + PowerMonitorCover.formatSeconds(fullRunway) + "\u00a77(full)/\u00a7f"
+                    + (shownOut > 0 ? PowerMonitorCover.formatSeconds(curRunway) : "idle") + "\u00a77(cur)");
         }
+        lastLadderProv = ladderProv;
         emaFuelReserve = ema(emaFuelReserve, snap.totalFuelReserveEU);
         shownFuelReserveEU = applyDeadband(shownFuelReserveEU, emaFuelReserve);
         // Per-generator fuel rows: each generator, its OWN internal tank
@@ -1282,6 +1300,7 @@ public class PowerMonitorCoverBehavior {
         order.sort((a, b2) -> Long.compare(connected.get(b2), connected.get(a)));
         java.util.HashSet<String> seen = new java.util.HashSet<>();
         java.util.List<String> lines = new java.util.ArrayList<>();
+        java.util.List<String> sharedNamesOut = new java.util.ArrayList<>();
         for (String name : order) {
             long total = connected.get(name); // shared pools only -- per-gen internal shown on its own rows
             seen.add(name);
@@ -1324,6 +1343,7 @@ public class PowerMonitorCoverBehavior {
             }
             if (lines.size() < 2) {
                 lines.add(formatReserveLine(name, total, netRate, windowed));
+                sharedNamesOut.add(name);
             }
         }
         reserveTracks.keySet().retainAll(seen); // vanished fluids drop their tracks
@@ -1331,6 +1351,7 @@ public class PowerMonitorCoverBehavior {
             lines.add("\u00a78  (pipe network larger than scanned)");
         }
         sharedFuelRows = lines.toArray(new String[0]);
+        lastSharedNames = sharedNamesOut;
     }
 
     /**
@@ -1379,7 +1400,11 @@ public class PowerMonitorCoverBehavior {
      * Returns {runtimeSeconds, displayName} or null when nothing limits.
      */
     private Object[] fuelPoolLimit(NetworkDiscovery.Snapshot snap, long demand) {
-        java.util.List<NetworkDiscovery.Snapshot.GeneratorProfile> profiles = snap.generatorFuelProfile;
+        return fuelPoolLimit(snap.generatorFuelProfile, demand, null);
+    }
+
+    private Object[] fuelPoolLimit(java.util.List<NetworkDiscovery.Snapshot.GeneratorProfile> profiles, long demand,
+            java.util.List<String> prov) {
         if (profiles.isEmpty()) {
             return null;
         }
@@ -1436,9 +1461,19 @@ public class PowerMonitorCoverBehavior {
             // Option-b guard: this fuel only limits if its generators dying
             // drops capacity below demand.
             if (totalRated - pool[2] >= demand) {
+                if (prov != null) {
+                    prov.add("\u00a78  " + displayFluidName(e.getKey())
+                            + ": non-limiting (capacity survives its loss)");
+                }
                 continue;
             }
             long runtime = pool[0] / pool[1] / 20;
+            if (prov != null) {
+                prov.add("\u00a77  " + displayFluidName(e.getKey()) + ": pool \u00a7f" + pool[0]
+                        + "\u00a77 EU \u00b7 burn \u00a7f" + pool[1] + "\u00a77 EU/t \u00b7 runtime \u00a7f"
+                        + PowerMonitorCover.formatSeconds(runtime) + "\u00a77 \u00b7 limits (capacity "
+                        + totalRated + "\u2212" + pool[2] + " < " + demand + ")");
+            }
             if (bestRuntime < 0 || runtime < bestRuntime) {
                 bestRuntime = runtime;
                 bestFuel = displayFluidName(e.getKey());
@@ -1467,6 +1502,73 @@ public class PowerMonitorCoverBehavior {
      * The panel showing its work -- disagreements between player and
      * instrument get settled by reading this, not by arguing.
      */
+    /** Per-row provenance: the math behind one panel line, on demand. */
+    public java.util.List<String> buildProvenance(String key) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        out.add("\u00a76[Power Monitor] \u00a77provenance: \u00a7f" + key);
+        if ("power".equals(key)) {
+            out.add("\u00a77Demand contributors:");
+            for (String l : lastDemandLines) {
+                out.add("\u00a77  " + l);
+            }
+            out.add("\u00a77Generator contributions (network-side):");
+            for (MeterTap tap : meterTaps) {
+                if (tap.isGenerator) {
+                    out.add("\u00a77  " + NetworkDiscovery.localNameOf(tap.container) + ": \u00a7f"
+                            + Math.round(tap.container.getAverageElectricOutput() * tap.netFactor) + "\u00a77 EU/t");
+                }
+            }
+        } else if ("loss".equals(key)) {
+            out.add("\u00a77loss = generation \u2212 delivered \u2212 \u0394storage");
+            out.add("\u00a77relay output toll: \u00a7f" + liveRelayTollEUt + "\u00a77 EU/t (buffers+transformers)");
+            out.add("\u00a77battery slope: \u00a7f" + String.format("%.2f", emaBatterySlope) + "\u00a77 EU/t");
+            out.add("\u00a77total-charge slope: \u00a7f" + String.format("%.2f", emaTotalChargeSlope) + "\u00a77 EU/t");
+        } else if ("charge".equals(key)) {
+            for (String l : lastBufferLines) {
+                out.add("\u00a77  " + l);
+            }
+            out.add("\u00a77battery slope \u00a7f" + String.format("%.2f", emaBatterySlope)
+                    + "\u00a77 EU/t \u00b7 total slope \u00a7f" + String.format("%.2f", emaTotalChargeSlope));
+        } else if ("ladder".equals(key)) {
+            out.add("\u00a77Per-generator ladder inputs (shares: this network only):");
+            for (String l : lastLadderProv) {
+                out.add("\u00a77  " + l);
+            }
+        } else if (key.startsWith("fuel:")) {
+            int i = Integer.parseInt(key.substring(5));
+            String[] gens = genFuelRows;
+            if (i < gens.length && i < lastGeneratorProfiles.size()) {
+                NetworkDiscovery.Snapshot.GeneratorProfile p = lastGeneratorProfiles.get(i);
+                out.add("\u00a77  " + NetworkDiscovery.localNameOf(p.source) + " \u00b7 tank \u00a7f" + p.fuelMb
+                        + "\u00a77 L of \u00a7f" + displayFluidName(p.fuelName) + "\u00a77 = \u00a7f" + p.fuelEU
+                        + "\u00a77 EU \u00b7 rated \u00a7f" + p.ratedEUt + "\u00a77 EU/t \u00b7 runway \u00a7f"
+                        + (p.ratedEUt > 0 ? PowerMonitorCover.formatSeconds(p.fuelEU / p.ratedEUt / 20) : "?"));
+            } else {
+                int j = i - gens.length;
+                java.util.List<String> names = lastSharedNames;
+                String fluid = j >= 0 && j < names.size() ? names.get(j) : "?";
+                out.add("\u00a77Shared pool: \u00a7f" + fluid + "\u00a77 (this network)");
+                for (String l : lastProducersDiag) {
+                    if (l.contains(fluid)) {
+                        out.add("\u00a77  " + l);
+                    }
+                }
+                for (String l : lastReserveDiag) {
+                    if (l.contains(fluid)) {
+                        out.add("\u00a77  " + l);
+                    }
+                }
+            }
+        } else if ("cycles".equals(key)) {
+            out.add("\u00a77demand \u00a7f" + lastCyclesDemand + "\u00a77 EU/t \u00b7 cycle \u00a7f"
+                    + lastCyclesSeconds + "\u00a77s");
+            java.util.List<String> pool = new java.util.ArrayList<>();
+            fuelPoolLimit(lastGeneratorProfiles, lastCyclesDemand, pool);
+            out.addAll(pool);
+        }
+        return out;
+    }
+
     public java.util.List<String> buildDiagnostics() {
         java.util.List<String> out = new java.util.ArrayList<>();
         java.util.List<gregtech.api.interfaces.tileentity.IBasicEnergyContainer> members = lastMembers;

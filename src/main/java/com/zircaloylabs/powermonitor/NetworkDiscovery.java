@@ -336,6 +336,9 @@ public final class NetworkDiscovery {
         /** Emission toll paid by fuel-less relays (buffers + transformers) -- real network loss. */
         public long relayOutputTollEUt = 0L;
 
+        /** Per-buffer provenance: "Name @ x,y,z : batteries X EU · tank Y/Z". */
+        public final List<String> bufferLines = new ArrayList<>();
+
         /** Machines with a loaded recipe parked in the insufficient-energy state (mProgresstime < 0). */
         public int starvedMachineCount = 0;
         public final List<String> starvedNames = new ArrayList<>();
@@ -497,6 +500,12 @@ public final class NetworkDiscovery {
             snap.relayOutputTollEUt += outputToll(container, container.getAverageElectricOutput());
             long[] storedAndCap = ((MTEBasicBatteryBuffer) mte).getStoredEnergy();
             snap.totalBufferedEU += storedAndCap[0];
+            if (snap.bufferLines.size() < 8) {
+                long tank = container.getStoredEU();
+                snap.bufferLines.add(localNameOf(container) + " @ " + coordsOf(container) + " : batteries "
+                        + Math.max(0L, storedAndCap[0] - tank) + " EU \u00b7 tank " + tank + "/"
+                        + container.getEUCapacity());
+            }
             snap.totalBufferCapacityEU += storedAndCap[1];
         } else {
             // Other storage (e.g. LSC found by direct cable contact): tile-level
