@@ -233,7 +233,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             if (toll > 0) {
                 s += " \u00b7 relay ~" + fmt(toll);
             }
-            return s + ") (" + c + pctText + "%\u00a77)";
+            return s + ") (" + c + pctText + "%\u00a77) \u00a78(10s)";
         }, "loss", b, guiPlayer);
 
         divider(column);
@@ -484,17 +484,16 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         MultiChartWidget chart = new MultiChartWidget();
         chart.add(new MultiChartWidget.Series("Demand", 0x55FF55, "EU/t", listSync(syncManager, "mc_dem", b::getChartDemand)));
         chart.add(new MultiChartWidget.Series("Generation", 0x55FFFF, "EU/t", listSync(syncManager, "mc_gen", b::getChartGeneration)));
-        chart.add(new MultiChartWidget.Series("Losses", 0xFF5555, "EU/t", listSync(syncManager, "mc_loss", b::getChartLosses)));
         chart.add(new MultiChartWidget.Series("Batteries", 0xFFAA00, "EU", listSync(syncManager, "mc_bat", b::getChartBuffered)));
         int[] fuelColors = { 0xAA66DD, 0x66DDAA, 0xDDDD66, 0xDD66AA, 0x66AADD, 0xAADD66 };
         StringSyncValue[] poolNames = new StringSyncValue[6];
         for (int i = 0; i < 6; i++) {
             final int slot = i;
             poolNames[i] = regStr(syncManager, "mc_fpn" + i, () -> b.getFuelPoolName(slot));
-            chart.add(new MultiChartWidget.Series("", fuelColors[i], "EU",
+            chart.add(new MultiChartWidget.Series("", fuelColors[i], "L",
                     listSync(syncManager, "mc_fp" + i, () -> b.getFuelPoolSeries(slot))));
         }
-        chart.size(CHART_WIDTH * 2 + CHART_GAP, 85);
+        chart.size(CHART_WIDTH * 2 + CHART_GAP - 26, 80);
         Flow legend = Flow.column().coverChildren();
         for (int i = 0; i < chart.getSeries().size(); i++) {
             final int idx = i;
@@ -503,7 +502,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                     .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
                     .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
                     .overlay(IKey.dynamic(() -> {
-                        String nm = idx >= 4 ? poolNames[idx - 4].getStringValue() : ser.name;
+                        String nm = idx >= 3 ? poolNames[idx - 3].getStringValue() : ser.name;
                         if (nm.isEmpty()) {
                             return "";
                         }
@@ -511,7 +510,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                         return colorHex(ser.color) + dot + "\u00a77" + nm + " \u00a7f"
                                 + compact(chart.liveOf(idx));
                     }))
-                    .size(76, 9)
+                    .size(102, 9)
                     .marginBottom(1)
                     .onUpdateListener(w -> {
                         if (w.isHovering()) {

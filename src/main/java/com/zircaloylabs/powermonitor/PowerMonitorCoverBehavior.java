@@ -99,6 +99,9 @@ public class PowerMonitorCoverBehavior {
             fuelPoolSlotHistory[i] = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
         }
     }
+    private volatile java.util.Map<String, Long> lastSharedLitersByName = java.util.Collections.emptyMap();
+    /** 10s ledger window: per-frame {generation, delivered, absorbed} for exact windowed loss accounting. */
+    private final java.util.ArrayDeque<long[]> lossWindow = new java.util.ArrayDeque<>();
     private volatile String lastLimitingFuel = "";
     private volatile long lastLimitingPoolEU = -1L;
     private volatile long lastCyclesDemand = 0L;
@@ -759,10 +762,22 @@ public class PowerMonitorCoverBehavior {
         // in the cables. Smoothed inputs, clamped, ~labelled -- packet
         // aliasing leaves a couple EU/t of residue in this number.
         long absorbed = Math.round(emaTotalChargeSlope); // level-derived: alias-free, band-drift-correct
-        // MODEL v2: the loss ledger must CLOSE on the panel --
-        // Generation - Losses = Delivered, same frame, no lag. (A survivor
-        // EMA here read 21 while the frame's truth was 37, field-caught.)
-        long lossRaw = Math.max(0L, emaGeneration - emaConsumption - absorbed);
+        // MODEL v2, refined by field: per-frame gen-minus-delivered rides
+        // offset duty windows and spuriously touches ZERO while current
+        // flows. WINDOWED EXACT ACCOUNTING instead: difference of 10s SUMS
+        // -- an integral, not an EMA; phase offsets cancel inside the
+        // window, and the ledger closes exactly over it.
+        lossWindow.addLast(new long[] { emaGeneration, emaConsumption, absorbed });
+        while (lossWindow.size() > 10) {
+            lossWindow.pollFirst();
+        }
+        long sumG = 0, sumD = 0, sumA = 0;
+        for (long[] f : lossWindow) {
+            sumG += f[0];
+            sumD += f[1];
+            sumA += f[2];
+        }
+        long lossRaw = Math.max(0L, (sumG - sumD - sumA) / Math.max(1, lossWindow.size()));
         emaLineLoss = lossRaw;
         shownLineLossEUt = lossRaw;
 
@@ -935,15 +950,15 @@ public class PowerMonitorCoverBehavior {
         }
         // Per-fuel pool recording (internals + shared) into stable slots.
         {
+            // LITERS, not EU-equivalent -- the operator thinks in tank volumes.
             java.util.Map<String, Long> pools = new java.util.LinkedHashMap<>();
             for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
                 if (p.fuelName != null && !p.fuelName.isEmpty()) {
-                    pools.merge(displayFluidName(p.fuelName), p.fuelEU, Long::sum);
+                    pools.merge(displayFluidName(p.fuelName), p.fuelMb, Long::sum);
                 }
             }
-            for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : lastSharedEUByFluid.entrySet()) {
-                pools.merge(displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1)
-                        .getLocalizedName()), e.getValue(), Long::sum);
+            for (java.util.Map.Entry<String, Long> e : lastSharedLitersByName.entrySet()) {
+                pools.merge(e.getKey(), e.getValue(), Long::sum);
             }
             for (java.util.Map.Entry<String, Long> e : pools.entrySet()) {
                 int slot = -1, free = -1;
@@ -1238,6 +1253,14 @@ public class PowerMonitorCoverBehavior {
         FluidReserves.Result scan = FluidReserves.scan(lastMembers, RESERVE_MAX_PIPES);
         lastConnectedReserveEU = scan.totalReserveEU;
         lastSharedEUByFluid = scan.euByFluid;
+        {
+            java.util.Map<String, Long> sl = new java.util.HashMap<>();
+            for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : scan.litersByFluid.entrySet()) {
+                sl.merge(displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1)
+                        .getLocalizedName()), e.getValue(), Long::sum);
+            }
+            lastSharedLitersByName = sl;
+        }
         // Producers: any multiblock whose output hatch the fluid walk
         // counted, currently running a recipe with fluid outputs.
         // Visited coke hatches are serving windows: the creosote lives in
@@ -1725,8 +1748,13 @@ public class PowerMonitorCoverBehavior {
             out.add("\u00a77Generator contributions (network-side, same capture as the panel):");
             out.addAll(frameGenContribs);
         } else if ("loss".equals(key)) {
-            out.add("\u00a77loss = generation \u2212 delivered \u2212 \u0394storage (same frame: \u00a7f"
-                    + emaGeneration + "\u00a77 \u2212 \u00a7f" + emaConsumption + "\u00a77)");
+            long wg = 0, wd = 0;
+            for (long[] f : lossWindow) {
+                wg += f[0];
+                wd += f[1];
+            }
+            out.add("\u00a77loss = (\u03a3generation \u2212 \u03a3delivered \u2212 \u03a3\u0394storage) over "
+                    + lossWindow.size() + "s: \u00a7f" + wg + "\u00a77 \u2212 \u00a7f" + wd);
             out.add("\u00a77relay output toll: \u00a7f" + liveRelayTollEUt + "\u00a77 EU/t (buffers+transformers)");
             out.add("\u00a77battery slope: \u00a7f" + String.format("%.2f", emaBatterySlope) + "\u00a77 EU/t");
             out.add("\u00a77total-charge slope: \u00a7f" + String.format("%.2f", emaTotalChargeSlope) + "\u00a77 EU/t");
