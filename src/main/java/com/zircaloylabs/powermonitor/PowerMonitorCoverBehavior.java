@@ -62,6 +62,8 @@ public class PowerMonitorCoverBehavior {
     private long prevDemandForStep = -1L;
     private volatile long lastConnectedReserveEU = 0L;
     private volatile java.util.List<String> lastReserveDiag = java.util.Collections.emptyList();
+    private volatile java.util.Map<net.minecraftforge.fluids.Fluid, Long> lastSharedEUByFluid = java.util.Collections
+            .emptyMap();
     private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
     private volatile String[] sharedFuelRows = new String[0]; // connected pipe/tank pools, 10 s
     private volatile String cyclesLine = "";
@@ -468,14 +470,35 @@ public class PowerMonitorCoverBehavior {
         NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(allControllers,
                 discovery.members, runnableEU);
         rebuildMeterTaps(discovery.members, multis);
+        // Cycles = min(ENERGY bound, CAPACITY bound). Pooled energy over
+        // per-cycle cost is only honest while sustainable capacity stays
+        // above the multi's demand; the moment one fuel runs dry and rated
+        // capacity steps below demand, remaining energy in OTHER
+        // generators' tanks can't carry the recipe (field-falsified:
+        // "~13 cycles" displayed while a diesel engine sat 1 second from
+        // dry and capacity was about to step 512 -> 384 under a 480
+        // demand). Shared reserves extend the rungs of the generators
+        // that burn them.
         String cl = "";
         for (NetworkDiscovery.ControllerState st : multis.controllers) {
             if (st.demandEUt > 0 && st.controller.mMaxProgresstime > 0 && runnableEU > 0) {
                 long perCycle = st.demandEUt * st.controller.mMaxProgresstime;
-                if (perCycle > 0) {
-                    cl = "\u00a77" + st.name + ": \u00a7ffuel for ~" + (runnableEU / perCycle) + " cycles";
-                    break;
+                if (perCycle <= 0) {
+                    continue;
                 }
+                long energyCycles = runnableEU / perCycle;
+                long cycleSeconds = Math.max(1, st.controller.mMaxProgresstime / 20);
+                long[] cap = capacityBoundSeconds(snap, st.demandEUt);
+                long capacityCycles = cap[0] < 0 ? Long.MAX_VALUE : cap[0] / cycleSeconds;
+                long cycles = Math.min(energyCycles, capacityCycles);
+                cl = "\u00a77" + st.name + ": \u00a7ffuel for ~" + cycles + " cycles";
+                if (capacityCycles < energyCycles && cap[1] >= 0) {
+                    String limiting = limitingFuelName(snap, (int) cap[1]);
+                    if (!limiting.isEmpty()) {
+                        cl += " \u00a7c\u26a0 " + limiting + " nearly dry";
+                    }
+                }
+                break;
             }
         }
         cyclesLine = cl;
@@ -1010,6 +1033,7 @@ public class PowerMonitorCoverBehavior {
         reservePollCountdown = RESERVE_POLL_EVERY - 1;
         FluidReserves.Result scan = FluidReserves.scan(lastMembers, RESERVE_MAX_PIPES);
         lastConnectedReserveEU = scan.totalReserveEU;
+        lastSharedEUByFluid = scan.euByFluid;
         java.util.List<String> rd = new java.util.ArrayList<>(scan.tankLines);
         rd.add(0, "\u00a77Fluid walk: \u00a7f" + scan.pipesVisited + "\u00a77 pipes, \u00a7f" + scan.tankLines.size()
                 + "\u00a77 tanks" + (scan.truncated ? " \u00a78(truncated)" : ""));
@@ -1069,7 +1093,7 @@ public class PowerMonitorCoverBehavior {
                 }
             }
             if (lines.size() < 2) {
-                lines.add("\u00a77Shared: " + formatReserveLine(name, total, netRate, windowed).substring(2));
+                lines.add(formatReserveLine(name, total, netRate, windowed));
             }
         }
         reserveTracks.keySet().retainAll(seen); // vanished fluids drop their tracks
@@ -1115,6 +1139,75 @@ public class PowerMonitorCoverBehavior {
             return g[index];
         }
         return index - g.length < sh.length ? sh[index - g.length] : "";
+    }
+
+    /**
+     * Seconds until sustainable generation first steps below {@code demand}
+     * (the capacity staircase), or -1 if it never does. Each generator's
+     * runway = its own fuel EU plus an equal share of shared reserves it
+     * can burn, over its rated output. Returns {seconds, profileIndexOfBindingGen}.
+     */
+    private long[] capacityBoundSeconds(NetworkDiscovery.Snapshot snap, long demand) {
+        java.util.List<NetworkDiscovery.Snapshot.GeneratorProfile> profiles = snap.generatorFuelProfile;
+        int n = profiles.size();
+        if (n == 0) {
+            return new long[] { 0, -1 };
+        }
+        // Shared augmentation: split each shared fluid's EU among the
+        // generators that can burn it.
+        long[] extraEU = new long[n];
+        for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : lastSharedEUByFluid.entrySet()) {
+            net.minecraftforge.fluids.FluidStack probe = new net.minecraftforge.fluids.FluidStack(e.getKey(), 1000);
+            java.util.List<Integer> burners = new java.util.ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                Object mte = ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) profiles.get(i).source)
+                        .getMetaTileEntity();
+                if (mte instanceof gregtech.api.metatileentity.implementations.MTEBasicGenerator
+                        && ((gregtech.api.metatileentity.implementations.MTEBasicGenerator) mte).getFuelValue(probe,
+                                true) > 0) {
+                    burners.add(i);
+                }
+            }
+            if (!burners.isEmpty()) {
+                long share = e.getValue() / burners.size();
+                for (int i : burners) {
+                    extraEU[i] += share;
+                }
+            }
+        }
+        // Runways, then walk the staircase longest-lived last.
+        long[][] runway = new long[n][2]; // {seconds, index}
+        for (int i = 0; i < n; i++) {
+            NetworkDiscovery.Snapshot.GeneratorProfile p = profiles.get(i);
+            long rate = Math.max(1, p.ratedEUt);
+            runway[i][0] = (p.fuelEU + extraEU[i]) / rate / 20;
+            runway[i][1] = i;
+        }
+        java.util.Arrays.sort(runway, (a, b2) -> Long.compare(a[0], b2[0]));
+        long capacity = 0;
+        for (NetworkDiscovery.Snapshot.GeneratorProfile p : profiles) {
+            capacity += p.ratedEUt;
+        }
+        for (long[] r : runway) {
+            if (capacity < demand) {
+                // already below before this gen dies -- bound is the PREVIOUS death; conservatively 0
+                return new long[] { 0, r[1] };
+            }
+            long after = capacity - profiles.get((int) r[1]).ratedEUt;
+            if (after < demand) {
+                return new long[] { r[0], r[1] }; // this generator's death is the cliff
+            }
+            capacity = after;
+        }
+        return new long[] { -1, -1 }; // capacity never drops below demand
+    }
+
+    private String limitingFuelName(NetworkDiscovery.Snapshot snap, int profileIndex) {
+        if (profileIndex < 0 || profileIndex >= snap.generatorFuelProfile.size()) {
+            return "";
+        }
+        String f = snap.generatorFuelProfile.get(profileIndex).fuelName;
+        return f == null || f.isEmpty() ? "" : displayFluidName(f);
     }
 
     public String getCyclesLine() {

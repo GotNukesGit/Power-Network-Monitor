@@ -2,7 +2,8 @@
 navigation:
   title: "Transformers"
   parent: /index.md
-  position: 60
+  icon: 'minecraft:comparator'
+  position: 40
 ---
 
 # Transformers
@@ -20,7 +21,7 @@ as machines):
   the lower.
 - **Step-up:** accepts up to 4 low-tier amps (the tooltip's number; it will
   actually take one extra to keep its buffer fed), emits **1A of the higher
-  tier** -- which makes a single step-up transformer a hard ceiling of one
+  tier** -- which makes a single step-up transformer a <Color color="#55FFFF"><Tooltip label="hard ceiling">A step-up transformer emits exactly 1 amp of the higher tier -- 128 EU/t for LV/MV -- no matter how much low-tier power feeds it. Parallel transformers raise the ceiling.</Tooltip></Color> of one
   high-tier packet per tick on everything behind it.
 
 That output ceiling is the number to check when a step-up network feels

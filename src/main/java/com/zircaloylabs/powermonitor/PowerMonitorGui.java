@@ -352,7 +352,6 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return line.isEmpty() ? "\u00a77Top draw: \u00a7fnone" : "\u00a77Top draw: \u00a7f" + line;
         });
         row(column, () -> cycles.getStringValue());
-        row(column, () -> cycles.getStringValue());
         // Network-scope peaks (moved from the per-segment cable row).
         row(column, () -> {
             String s = "\u00a77Peak demand: \u00a7f" + fmt(peakDemand.getLongValue());

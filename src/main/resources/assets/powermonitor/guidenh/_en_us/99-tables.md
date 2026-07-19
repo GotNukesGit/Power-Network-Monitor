@@ -2,14 +2,15 @@
 navigation:
   title: "Reference Tables"
   parent: /index.md
-  position: 90
+  icon: 'minecraft:book'
+  position: 10
 ---
 
 # Reference Tables
 
 All values read from GT 5.09.54.20 / GTNH 2.8.x source registrations.
 
-## Cables, ULV-MV (per 1x size -- sizes multiply amps; wires lose 2x and shock)
+## <Color color="#FFAA00">Cables, ULV-MV (per 1x size -- sizes multiply amps; wires lose 2x and shock)</Color>
 
 | Material | Tier | Amps (1x) | Cable loss /m/A |
 |----------|------|-----------|------------------|
@@ -31,7 +32,7 @@ materials from different mods -- confusing them costs real debugging time.
 Truly lossless multi-amp wire (superconductor) exists but its production
 chain begins tiers later.
 
-## Emission toll (per amp)
+## <Color color="#FFAA00">Emission toll (per amp)</Color>
 
 | Tier | Emits | Pays | As a share |
 |------|-------|------|------------|
@@ -39,7 +40,7 @@ chain begins tiers later.
 | LV | 32 | 33 | 3.1% |
 | MV | 128 | 130 | 1.6% |
 
-## Amp rules
+## <Color color="#FFAA00">Amp rules</Color>
 
 | Device | In | Out |
 |--------|----|----|
@@ -49,7 +50,7 @@ chain begins tiers later.
 | Transformer (step-up) | 4A low (+1 slack) | 1A high |
 | Transformer (step-down) | 1A high | up to 4A low |
 
-## Hazards (all source-verified)
+## <Color color="#FFAA00">Hazards (all source-verified)</Color>
 
 - Packet over machine's input voltage: **explosion** (logged).
 - Packet over cable's max voltage: under-rated segments **catch fire**.
@@ -57,7 +58,7 @@ chain begins tiers later.
 - Rain on an exposed machine: 10% explosion / 90% fire per trigger. Roof it.
 - Fire adjacent: explosion risk. Water: verified harmless.
 
-## Overclocking (MV running LV recipes)
+## <Color color="#FFAA00">Overclocking (MV running LV recipes)</Color>
 
 Per tier above the recipe: **4x energy, 2x speed**. An MV machine runs an LV
 recipe twice as fast at four times the EU/t -- budget amps accordingly.

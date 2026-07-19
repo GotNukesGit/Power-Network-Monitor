@@ -61,6 +61,8 @@ public final class FluidReserves {
         public boolean truncated = false;
         /** EU-equivalent of all connected reserves, via each fluid's best burning generator. */
         public long totalReserveEU = 0L;
+        /** Per-fluid EU-equivalent of shared reserves (for staircase augmentation). */
+        public final Map<Fluid, Long> euByFluid = new LinkedHashMap<>();
         /** Diagnostic: every counted tank ("Name @ x,y,z : fluid amounts"). */
         public final java.util.List<String> tankLines = new java.util.ArrayList<>();
         public int pipesVisited = 0;
@@ -220,7 +222,9 @@ public final class FluidReserves {
             if (bestEuPerMb <= 0) {
                 it.remove(); // nobody burns it
             } else {
-                result.totalReserveEU += Math.round(e.getValue() * bestEuPerMb);
+                long eu = Math.round(e.getValue() * bestEuPerMb);
+                result.totalReserveEU += eu;
+                result.euByFluid.put(e.getKey(), eu);
             }
         }
     }

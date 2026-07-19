@@ -2,7 +2,8 @@
 navigation:
   title: "Cables"
   parent: /index.md
-  position: 20
+  icon: 'minecraft:iron_ingot'
+  position: 80
 ---
 
 # Cables: Ratings, Loss, and Fire
@@ -23,14 +24,14 @@ burst-pulls don't burn a backbone that averages under its rating.)
 it crosses. The packet *shrinks in transit*: what matters downstream is what
 arrives, not what was sent.
 
-## The rule that follows
+## <Color color="#FFAA00">The rule that follows</Color>
 
 <Latex formula="\text{deliverable} = \text{rating} - (\text{blocks} \times \text{loss} \times \text{amps})"/>
 
-The nameplate is an <Tooltip label="injection ceiling">The most EU/t a source can PUT ONTO this cable -- what arrives downstream is always less by the path loss.</Tooltip>. Nobody downstream ever receives
+The nameplate is an <Color color="#55FFFF"><Tooltip label="injection ceiling">The most EU/t a source can PUT ONTO this cable -- what arrives downstream is always less by the path loss.</Tooltip></Color>. Nobody downstream ever receives
 the nameplate.
 
-## Connections
+## <Color color="#FFAA00">Connections</Color>
 
 Cables of *different materials* connect and conduct -- the game routes by the
 live connection state, not by matching materials. Wire cutters sever a

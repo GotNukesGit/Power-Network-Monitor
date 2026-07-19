@@ -2,7 +2,8 @@
 navigation:
   title: "Generators"
   parent: /index.md
-  position: 40
+  icon: 'minecraft:coal'
+  position: 60
 ---
 
 # Generators

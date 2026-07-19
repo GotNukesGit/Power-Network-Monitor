@@ -21,7 +21,7 @@ battery drain or machine explosion, rather than after.
 
 </details>
 
-## Chapters
+## <Color color="#FFAA00">Chapters</Color>
 
 - [The Packet Model: Volts and Amps](01-basics.md)
 - [Cables: Ratings, Loss, and Fire](02-cables.md)
