@@ -69,9 +69,10 @@ public class PowerMonitorCoverBehavior {
             .emptyList();
     private java.util.List<NetworkDiscovery.Snapshot.GeneratorProfile> lastGeneratorProfiles = java.util.Collections
             .emptyList();
-    /** Per-producer measured rate memory: {L-per-sec, lastSeenRunningWorldTime} -- smooths async recipe gaps. */
+    /** Per-producer measured rate memory {L-per-sec, lastSeenRunningWorldTime}; census keeps it while the producer stays enabled. */
     private final java.util.IdentityHashMap<Object, java.util.Map<String, double[]>> producerRateMemory = new java.util.IdentityHashMap<>();
-    private static final long PRODUCER_IDLE_GRACE_TICKS = 20L * 30;
+    private final java.util.IdentityHashMap<Object, String> producerRecipeName = new java.util.IdentityHashMap<>();
+    private volatile java.util.List<String> lastProducersDiag = java.util.Collections.emptyList();
     private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
     private volatile String[] sharedFuelRows = new String[0]; // connected pipe/tank pools, 10 s
     private volatile String cyclesLine = "";
@@ -1063,6 +1064,7 @@ public class PowerMonitorCoverBehavior {
         // liters and EU reflect what actually exists.
         java.util.Map<net.minecraftforge.fluids.Fluid, Long> ovenInternals = new java.util.HashMap<>();
         java.util.Map<String, Double> modeledProduction = new java.util.HashMap<>();
+        java.util.List<String> producersDiag = new java.util.ArrayList<>();
         // The reworked coke oven outputs through its OWN hatch type with a
         // private controller linkage -- standard mOutputHatches stays empty.
         // Bridge by proximity: a visited coke hatch sits in its ovens'
@@ -1079,8 +1081,13 @@ public class PowerMonitorCoverBehavior {
         for (gregtech.api.metatileentity.implementations.MTEMultiBlockBase c : lastControllers) {
             boolean runningNow = c.mMaxProgresstime > 0 && c.mOutputFluids != null;
             boolean allowed = c.getBaseMetaTileEntity() != null && c.getBaseMetaTileEntity().isAllowedToWork();
-            if (!runningNow && !(allowed && producerRateMemory.containsKey(c))) {
-                continue; // never seen producing, or malleted off
+            if (!allowed) {
+                producerRateMemory.remove(c); // malleted off: out of the census instantly
+                producerRecipeName.remove(c);
+                continue;
+            }
+            if (!runningNow && !producerRateMemory.containsKey(c)) {
+                continue; // never seen producing yet
             }
             boolean scoped = false;
             for (gregtech.api.metatileentity.implementations.MTEHatchOutput h : c.mOutputHatches) {
@@ -1114,26 +1121,53 @@ public class PowerMonitorCoverBehavior {
             java.util.Map<String, double[]> mem = producerRateMemory.computeIfAbsent(c,
                     k -> new java.util.HashMap<>());
             if (runningNow) {
-                // Record this producer's measured recipe rate; the memory
-                // carries it across the brief between-recipe gap so async
-                // ovens polled at random phases don't make the total flap
-                // (field-observed: +18..+63 L/s from a steady 8-oven wall).
                 for (net.minecraftforge.fluids.FluidStack fs : c.mOutputFluids) {
                     if (fs != null && fs.amount > 0) {
                         mem.put(displayFluidName(fs.getLocalizedName()),
                                 new double[] { fs.amount * 20.0 / c.mMaxProgresstime, worldTime });
                     }
                 }
-            }
-            for (java.util.Map.Entry<String, double[]> e : mem.entrySet()) {
-                double[] v = e.getValue();
-                if (runningNow || worldTime - v[1] <= PRODUCER_IDLE_GRACE_TICKS) {
-                    modeledProduction.merge(e.getKey(), v[0], Double::sum);
+                if (c.mOutputItems != null && c.mOutputItems.length > 0 && c.mOutputItems[0] != null) {
+                    producerRecipeName.put(c, c.mOutputItems[0].getDisplayName());
                 }
             }
+            // CENSUS (operator-designed): membership = scoped + enabled +
+            // rate-known. Population changes on mallet timescales, so the
+            // total structurally cannot cycle. An enabled-but-starved
+            // producer keeps reporting CAPABILITY; the tank level and the
+            // deterioration override tell the throughput story.
+            StringBuilder pd = new StringBuilder("\u00a77");
+            pd.append(NetworkDiscovery.localNameOf((gregtech.api.interfaces.tileentity.IBasicEnergyContainer) c
+                    .getBaseMetaTileEntity()));
+            pd.append(" @ ").append(c.getBaseMetaTileEntity().getXCoord()).append(",")
+                    .append(c.getBaseMetaTileEntity().getYCoord()).append(",")
+                    .append(c.getBaseMetaTileEntity().getZCoord());
+            pd.append(runningNow ? " \u00a7arunning \u00a77" : " \u00a78idle \u00a77");
+            if (runningNow) {
+                pd.append(c.mProgresstime).append("/").append(c.mMaxProgresstime).append("t ");
+            }
+            String recipe = producerRecipeName.get(c);
+            if (recipe != null) {
+                pd.append("\u00b7 ").append(recipe).append(" ");
+            }
+            for (java.util.Map.Entry<String, double[]> e : mem.entrySet()) {
+                modeledProduction.merge(e.getKey(), e.getValue()[0], Double::sum);
+                pd.append("\u00b7 ").append(e.getKey()).append(" ")
+                        .append(String.format("%.1f", e.getValue()[0])).append(" L/s ");
+            }
+            if (c instanceof gregtech.common.tileentities.machines.multi.MTECokeOven) {
+                net.minecraftforge.fluids.FluidStack brew2 = ((gregtech.common.tileentities.machines.multi.MTECokeOven) c)
+                        .getFluid();
+                if (brew2 != null) {
+                    pd.append("\u00b7 int ").append(brew2.amount).append("L");
+                }
+            }
+            producersDiag.add(pd.toString());
         }
-        // Forget producers that vanished from the world scan entirely.
+        // Forget producers that vanished or were switched off.
         producerRateMemory.keySet().retainAll(new java.util.HashSet<Object>(lastControllers));
+        producerRecipeName.keySet().retainAll(producerRateMemory.keySet());
+        lastProducersDiag = producersDiag;
         // Measured consumption per fluid: each burning generator's fuel-side
         // EU rate over its verified EU-per-liter.
         java.util.Map<String, Double> consumption = new java.util.HashMap<>();
@@ -1406,6 +1440,10 @@ public class PowerMonitorCoverBehavior {
             out.add("\u00a77  [" + kind + "] \u00a7f" + NetworkDiscovery.localNameOf(m) + "\u00a78 (" + cls + ") \u00a77@ "
                     + NetworkDiscovery.coordsOf(m));
             shown++;
+        }
+        out.add("\u00a77Producers (" + lastProducersDiag.size() + "):");
+        for (String line : lastProducersDiag) {
+            out.add("\u00a77  " + line);
         }
         out.add("\u00a77Fluids:");
         for (String line : lastReserveDiag) {
