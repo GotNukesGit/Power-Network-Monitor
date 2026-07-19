@@ -512,6 +512,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                                 + compact(chart.liveOf(idx));
                     }))
                     .size(76, 9)
+                    .marginBottom(1)
                     .onUpdateListener(w -> {
                         if (w.isHovering()) {
                             chart.setLegendHover(idx);

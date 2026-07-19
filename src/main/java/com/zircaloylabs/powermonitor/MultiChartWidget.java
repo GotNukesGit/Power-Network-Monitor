@@ -131,8 +131,9 @@ public class MultiChartWidget extends Widget<MultiChartWidget> implements Intera
         hovered = hov;
 
         // Second pass: draw dimmed non-hovered when something IS hovered.
+        // MUI2 pre-translates GL to the widget origin (verified against
+        // GT's LineChartWidget) -- draw LOCAL, no translate.
         GL11.glPushMatrix();
-        GL11.glTranslatef(getArea().x, getArea().y, 0);
         GL11.glDisable(GL11.GL_TEXTURE_2D);
         GL11.glEnable(GL11.GL_BLEND);
         GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
