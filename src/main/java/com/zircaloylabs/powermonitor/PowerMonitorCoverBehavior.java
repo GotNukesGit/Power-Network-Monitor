@@ -85,6 +85,7 @@ public class PowerMonitorCoverBehavior {
     private volatile java.util.List<String> lastLadderProv = java.util.Collections.emptyList();
     private volatile java.util.List<String> lastBufferLines = java.util.Collections.emptyList();
     private volatile java.util.List<String> lastSharedNames = java.util.Collections.emptyList();
+    private volatile java.util.Map<String, Double> lastProductionEUt = java.util.Collections.emptyMap();
     private volatile long lastCyclesDemand = 0L;
     private volatile long lastCyclesSeconds = 0L;
     private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
@@ -524,17 +525,19 @@ public class PowerMonitorCoverBehavior {
                 Object[] pool = fuelPoolLimit(snap, st.demandEUt);
                 long cycles = energyCycles;
                 String limitNote = "";
+                String clock = "";
                 if (pool != null) {
                     long runtimeSec = (Long) pool[0];
                     String fuel = (String) pool[1];
                     long poolCycles = runtimeSec / cycleSeconds;
                     if (poolCycles < cycles) {
                         cycles = poolCycles;
+                        clock = " \u00a77(~" + PowerMonitorCover.formatSeconds(runtimeSec) + ")";
                         limitNote = runtimeSec < 2 * cycleSeconds ? " \u00a7c\u26a0 " + fuel + " nearly dry"
                                 : " \u00a78\u00b7 limited by " + fuel;
                     }
                 }
-                cl = "\u00a77" + st.name + ": \u00a7ffuel for ~" + cycles + " cycles" + limitNote;
+                cl = "\u00a77" + st.name + ": \u00a7ffuel for ~" + cycles + " cycles" + clock + limitNote;
                 break;
             }
         }
@@ -1296,6 +1299,20 @@ public class PowerMonitorCoverBehavior {
             }
         }
         java.util.Map<String, Double> modeledNet = netMap;
+        // Production in EU/t per fluid (display name): rate L/s x EU-per-L / 20.
+        java.util.Map<String, Double> prodEUt = new java.util.HashMap<>();
+        for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : scan.euByFluid.entrySet()) {
+            Long liters = scan.litersByFluid.get(e.getKey());
+            if (liters == null || liters <= 0) {
+                continue;
+            }
+            String dn = displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1).getLocalizedName());
+            Double prodLs = modeledProduction.get(dn);
+            if (prodLs != null && prodLs > 0) {
+                prodEUt.put(dn, prodLs * (e.getValue() / (double) liters) / 20.0);
+            }
+        }
+        lastProductionEUt = prodEUt;
         // Fold oven internals into the shared totals and EU estimate.
         for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : ovenInternals.entrySet()) {
             scan.litersByFluid.merge(e.getKey(), e.getValue(), Long::sum);
@@ -1499,10 +1516,24 @@ public class PowerMonitorCoverBehavior {
                 }
                 continue;
             }
-            long runtime = pool[0] / pool[1] / 20;
+            // PRODUCTION-AWARE drain (field-convicted: cycles named creosote
+            // limiting at 33m while the row -- production-aware -- showed the
+            // pool outlasting both diesels; the true limiter was diesel).
+            double prodHere = lastProductionEUt.getOrDefault(displayFluidName(e.getKey()), 0.0);
+            double effDrain = pool[1] - prodHere;
+            if (effDrain <= 0.5) {
+                if (prov != null) {
+                    prov.add("\u00a78  " + displayFluidName(e.getKey())
+                            + ": self-sustaining at current production (+"
+                            + String.format("%.0f", prodHere) + " EU/t vs " + pool[1] + " burn)");
+                }
+                continue;
+            }
+            long runtime = (long) (pool[0] / effDrain / 20);
             if (prov != null) {
                 prov.add("\u00a77  " + displayFluidName(e.getKey()) + ": pool \u00a7f" + pool[0]
-                        + "\u00a77 EU \u00b7 burn \u00a7f" + pool[1] + "\u00a77 EU/t \u00b7 runtime \u00a7f"
+                        + "\u00a77 EU \u00b7 burn \u00a7f" + pool[1] + "\u00a77\u2212prod \u00a7f"
+                        + String.format("%.0f", prodHere) + "\u00a77 EU/t \u00b7 runtime \u00a7f"
                         + PowerMonitorCover.formatSeconds(runtime) + "\u00a77 \u00b7 limits (capacity "
                         + totalRated + "\u2212" + pool[2] + " < " + demand + ")");
             }

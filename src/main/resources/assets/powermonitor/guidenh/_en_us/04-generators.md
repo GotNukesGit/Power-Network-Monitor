@@ -49,12 +49,12 @@ off reserves.
   </BlockAnnotation>
   <BlockAnnotation pos="2 0 3" color="#8044DD66" thickness="2">
 
-**LV Steam Turbine** -- 7 L of steam per 3 EU (85% efficiency). Full **32 EU/t** output needs a *sustained* **~1,500 L/s** (75 L/t). Underfed, it quietly makes less while looking busy.
+**LV Steam Turbine** -- 85% efficiency. Its own tooltip says **1,552 L/s**, and that figure includes the toll: the turbine drinks steam for **33 EU per 32 delivered** (the emission toll, paid in steam -- see Output Loss). Underfed, it quietly makes less while looking busy.
 
   </BlockAnnotation>
   <BlockAnnotation pos="6 0 3" color="#80AA66DD" thickness="2">
 
-**MV Steam Turbine** -- 8 L of steam per 3 EU (75% efficiency). Full **128 EU/t** output needs a *sustained* **~6,800 L/s** (341 L/t) -- plan a serious boiler bank or a Large Boiler before relying on it.
+**MV Steam Turbine** -- 75% efficiency. Its tooltip's **6,933 L/s** likewise covers **130 EU per 128 delivered** (the MV toll, in steam). Plan a serious boiler bank or a Large Boiler before relying on it.
 
   </BlockAnnotation>
 </GameScene>
