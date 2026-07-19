@@ -867,8 +867,11 @@ public class PowerMonitorCoverBehavior {
             }
             genFuelRows = rows.toArray(new String[0]);
         }
-        fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true);
-        fuelScheduleCurrent = buildFuelSchedule(smoothedProfile, false);
+        fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true, -1L);
+        // Header rate = the same network-level smoothed figure POWER shows:
+        // one number, one truth. (Sum-of-per-gen-deadbands hops a few EU/t
+        // every second; the rungs still use per-gen rates -- they must.)
+        fuelScheduleCurrent = buildFuelSchedule(smoothedProfile, false, shownGenerationEUt);
         // Per-generator internal reserves: EACH generator, its own fuel, its
         // own runway at rated burn (operator-specified layout -- the unified
         // ladder is the network view, these are the machines).
@@ -1454,95 +1457,89 @@ public class PowerMonitorCoverBehavior {
 
     private Object[] fuelPoolLimit(java.util.List<NetworkDiscovery.Snapshot.GeneratorProfile> profiles, long demand,
             java.util.List<String> prov) {
-        if (profiles.isEmpty()) {
+        // PER-GENERATOR STAIRCASE (field-convicted: isolated diesel tanks
+        // don't pool -- engine #2 dies at 25m and the recipe browns out at
+        // 512->384 < 480, regardless of fuel left in engine #1's tank).
+        // Runway_i = (internal + tank-gated share of shared reserves) over
+        // (rated minus its slice of modeled production). Walk deaths
+        // shortest-first; the wall is the first death that drops capacity
+        // below demand. Limiting fuel = the dying generator's tank.
+        int n = profiles.size();
+        if (n == 0) {
             return null;
         }
-        // Shared EU by localized fluid name (pools key on the fluid itself).
-        java.util.Map<String, Long> sharedEU = new java.util.HashMap<>();
-        java.util.Map<String, net.minecraftforge.fluids.FluidStack> probes = new java.util.HashMap<>();
+        // Tank-content-gated shared splits + producer slices, per fluid.
+        java.util.Map<String, long[]> byFluid = new java.util.HashMap<>(); // name -> {ratedSum, count}
+        for (NetworkDiscovery.Snapshot.GeneratorProfile p : profiles) {
+            if (p.fuelName != null && !p.fuelName.isEmpty()) {
+                long[] v = byFluid.computeIfAbsent(p.fuelName, k -> new long[2]);
+                v[0] += p.ratedEUt;
+                v[1]++;
+            }
+        }
+        java.util.Map<String, Long> sharedEUByName = new java.util.HashMap<>();
         for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : lastSharedEUByFluid.entrySet()) {
-            net.minecraftforge.fluids.FluidStack fs = new net.minecraftforge.fluids.FluidStack(e.getKey(), 1000);
-            sharedEU.merge(fs.getLocalizedName(), e.getValue(), Long::sum);
-            probes.put(fs.getLocalizedName(), fs);
+            sharedEUByName.merge(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1).getLocalizedName(),
+                    e.getValue(), Long::sum);
         }
-        // Assign each generator to one fuel: its tank's fluid, else the
-        // first shared fluid it can burn (plumbed but momentarily empty).
-        java.util.Map<String, long[]> pools = new java.util.HashMap<>(); // name -> {availEU, burnEUt, ratedSum}
-        for (NetworkDiscovery.Snapshot.GeneratorProfile p : profiles) {
-            String fuel = p.fuelName != null && !p.fuelName.isEmpty() ? p.fuelName : null;
-            if (fuel == null) {
-                Object mte = ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) p.source).getMetaTileEntity();
-                if (mte instanceof gregtech.api.metatileentity.implementations.MTEBasicGenerator) {
-                    for (java.util.Map.Entry<String, net.minecraftforge.fluids.FluidStack> pr : probes.entrySet()) {
-                        if (((gregtech.api.metatileentity.implementations.MTEBasicGenerator) mte)
-                                .getFuelValue(pr.getValue(), true) > 0) {
-                            fuel = pr.getKey();
-                            break;
-                        }
-                    }
+        long[][] deaths = new long[n][2]; // {runwaySeconds, index}
+        long capacity = 0;
+        for (int i = 0; i < n; i++) {
+            NetworkDiscovery.Snapshot.GeneratorProfile p = profiles.get(i);
+            capacity += p.ratedEUt;
+            long[] fluidAgg = p.fuelName != null ? byFluid.get(p.fuelName) : null;
+            long share = 0;
+            double prodSlice = 0;
+            if (fluidAgg != null && fluidAgg[0] > 0) {
+                Long sh = sharedEUByName.get(p.fuelName);
+                if (sh != null) {
+                    share = sh * p.ratedEUt / fluidAgg[0];
                 }
+                prodSlice = lastProductionEUt.getOrDefault(displayFluidName(p.fuelName), 0.0) / fluidAgg[1];
             }
-            if (fuel == null) {
-                continue;
+            double effDrain = p.ratedEUt - prodSlice;
+            long runway;
+            if (p.fuelEU + share <= 0) {
+                runway = 0;
+            } else if (effDrain <= 0.5) {
+                runway = Long.MAX_VALUE / 4; // self-sustaining at current production
+            } else {
+                runway = (long) ((p.fuelEU + share) / effDrain / 20);
             }
-            long[] pool = pools.computeIfAbsent(fuel, k -> new long[3]);
-            pool[0] += p.fuelEU;
-            pool[1] += Math.max(0L, p.rawOutEUt); // fuel-side burn: decrement incl toll
-            pool[2] += p.ratedEUt;
-        }
-        for (java.util.Map.Entry<String, Long> e : sharedEU.entrySet()) {
-            long[] pool = pools.get(e.getKey());
-            if (pool != null) {
-                pool[0] += e.getValue();
-            }
-        }
-        long totalRated = 0;
-        for (NetworkDiscovery.Snapshot.GeneratorProfile p : profiles) {
-            totalRated += p.ratedEUt;
-        }
-        long bestRuntime = -1;
-        String bestFuel = "";
-        for (java.util.Map.Entry<String, long[]> e : pools.entrySet()) {
-            long[] pool = e.getValue();
-            if (pool[1] <= 0) {
-                continue; // nobody currently burning it -- no drain, no limit
-            }
-            // Option-b guard: this fuel only limits if its generators dying
-            // drops capacity below demand.
-            if (totalRated - pool[2] >= demand) {
-                if (prov != null) {
-                    prov.add("\u00a78  " + displayFluidName(e.getKey())
-                            + ": non-limiting (capacity survives its loss)");
-                }
-                continue;
-            }
-            // PRODUCTION-AWARE drain (field-convicted: cycles named creosote
-            // limiting at 33m while the row -- production-aware -- showed the
-            // pool outlasting both diesels; the true limiter was diesel).
-            double prodHere = lastProductionEUt.getOrDefault(displayFluidName(e.getKey()), 0.0);
-            double effDrain = pool[1] - prodHere;
-            if (effDrain <= 0.5) {
-                if (prov != null) {
-                    prov.add("\u00a78  " + displayFluidName(e.getKey())
-                            + ": self-sustaining at current production (+"
-                            + String.format("%.0f", prodHere) + " EU/t vs " + pool[1] + " burn)");
-                }
-                continue;
-            }
-            long runtime = (long) (pool[0] / effDrain / 20);
+            deaths[i][0] = runway;
+            deaths[i][1] = i;
             if (prov != null) {
-                prov.add("\u00a77  " + displayFluidName(e.getKey()) + ": pool \u00a7f" + pool[0]
-                        + "\u00a77 EU \u00b7 burn \u00a7f" + pool[1] + "\u00a77\u2212prod \u00a7f"
-                        + String.format("%.0f", prodHere) + "\u00a77 EU/t \u00b7 runtime \u00a7f"
-                        + PowerMonitorCover.formatSeconds(runtime) + "\u00a77 \u00b7 limits (capacity "
-                        + totalRated + "\u2212" + pool[2] + " < " + demand + ")");
-            }
-            if (bestRuntime < 0 || runtime < bestRuntime) {
-                bestRuntime = runtime;
-                bestFuel = displayFluidName(e.getKey());
+                prov.add("\u00a77  " + NetworkDiscovery.localNameOf(p.source) + " ("
+                        + (p.fuelName == null || p.fuelName.isEmpty() ? "no fuel" : displayFluidName(p.fuelName))
+                        + "): fuel \u00a7f" + (p.fuelEU + share) + "\u00a77 EU \u00b7 drain \u00a7f"
+                        + String.format("%.0f", effDrain) + "\u00a77 EU/t \u00b7 dies \u00a7f"
+                        + (runway >= Long.MAX_VALUE / 8 ? "never (self-sustaining)"
+                                : PowerMonitorCover.formatSeconds(runway)));
             }
         }
-        return bestRuntime < 0 ? null : new Object[] { bestRuntime, bestFuel };
+        java.util.Arrays.sort(deaths, (a, b2) -> Long.compare(a[0], b2[0]));
+        for (long[] d : deaths) {
+            NetworkDiscovery.Snapshot.GeneratorProfile dying = profiles.get((int) d[1]);
+            long after = capacity - dying.ratedEUt;
+            if (after < demand) {
+                String fuel = dying.fuelName == null || dying.fuelName.isEmpty() ? "fuel"
+                        : displayFluidName(dying.fuelName);
+                if (prov != null) {
+                    prov.add("\u00a77  WALL: \u00a7f" + NetworkDiscovery.localNameOf(dying.source)
+                            + "\u00a77 dies at \u00a7f"
+                            + (d[0] >= Long.MAX_VALUE / 8 ? "never" : PowerMonitorCover.formatSeconds(d[0]))
+                            + "\u00a77, capacity \u00a7f" + capacity + "\u2192" + after + "\u00a77 < \u00a7f"
+                            + demand);
+                }
+                return d[0] >= Long.MAX_VALUE / 8 ? null : new Object[] { d[0], fuel };
+            }
+            if (prov != null) {
+                prov.add("\u00a78  " + NetworkDiscovery.localNameOf(dying.source) + " dies, capacity " + capacity
+                        + "\u2192" + after + " \u2265 " + demand + " -- survives");
+            }
+            capacity = after;
+        }
+        return null;
     }
 
     /** Batteries alone -- the quantity the Batteries chart plots. */
@@ -1730,7 +1727,7 @@ public class PowerMonitorCoverBehavior {
      *                 current measured output (generators idle or throttled
      *                 burn slower, so runtimes stretch accordingly).
      */
-    private static String buildFuelSchedule(java.util.List<long[]> profile, boolean fullBurn) {
+    private static String buildFuelSchedule(java.util.List<long[]> profile, boolean fullBurn, long headerRateOverride) {
         java.util.List<double[]> items = new java.util.ArrayList<>(); // {rateEUt, secondsUntilDry}
         for (long[] p : profile) {
             long rate = fullBurn ? p[1] : p[0];

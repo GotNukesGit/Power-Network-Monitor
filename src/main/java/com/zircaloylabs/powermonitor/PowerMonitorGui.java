@@ -123,6 +123,8 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue secFull = reg(syncManager, "pm_secfull", b::getSecondsToFull);
         LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getRunnableFuelEU); // gutter matches the runnable-basis series
         final net.minecraft.entity.player.EntityPlayer guiPlayer = data.getPlayer();
+        dbgSync = new com.cleanroommc.modularui.value.sync.BooleanSyncValue(b::isDebugMode, v -> {});
+        syncManager.syncValue("pm_dbg", dbgSync);
         LongSyncValue cable = reg(syncManager, "pm_cable", b::getAnchorThroughputEUt);
         LongSyncValue lineLoss = reg(syncManager, "pm_lineloss", b::getLineLossEUt);
         LongSyncValue peakDemand = reg(syncManager, "pm_peakdemand", b::getPeakDemandEUt);
@@ -445,7 +447,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 .child(new ButtonWidget<>()
                         .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
                         .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
-                        .overlay(IKey.dynamic(() -> b.isDebugMode() ? "\u00a7f[diag]" : ""))
+                        .overlay(IKey.dynamic(() -> dbgSync != null && dbgSync.getBoolValue() ? "\u00a7f[diag]" : ""))
                         .size(34, 11)
                         .marginLeft(3)
                         .tooltipStatic(t -> t.addLine("\u00a77Print network diagnostics to chat")
@@ -496,6 +498,8 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
     }
 
     /** Row with a per-line provenance button: click prints THIS row's math to chat. */
+    private com.cleanroommc.modularui.value.sync.BooleanSyncValue dbgSync;
+
     private void rowP(Flow column, Supplier<String> text, String provKey, PowerMonitorCoverBehavior b,
             net.minecraft.entity.player.EntityPlayer player) {
         column.child(Flow.row().coverChildren().marginBottom(2)
@@ -503,7 +507,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 .child(new ButtonWidget<>()
                         .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
                         .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
-                        .overlay(IKey.dynamic(() -> b.isDebugMode() && !text.get().isEmpty() ? "\u00a78?" : ""))
+                        .overlay(IKey.dynamic(() -> dbgSync != null && dbgSync.getBoolValue() && !text.get().isEmpty() ? "\u00a78?" : ""))
                         .size(7, 9)
                         .marginLeft(3)
                         .tooltipStatic(t -> t.addLine("\u00a77Show this row's math in chat \u00a78(debug mode)"))
