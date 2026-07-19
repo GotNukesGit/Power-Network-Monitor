@@ -90,6 +90,15 @@ public class PowerMonitorCoverBehavior {
     private volatile java.util.List<String> lastBufferLines = java.util.Collections.emptyList();
     private volatile java.util.List<String> lastSharedNames = java.util.Collections.emptyList();
     private volatile java.util.Map<String, Double> lastProductionEUt = java.util.Collections.emptyMap();
+    /** Per-fuel pool series for the multi-chart: 6 stable slots, name + capped history. */
+    private final String[] fuelPoolSlotNames = new String[6];
+    @SuppressWarnings("unchecked")
+    private final java.util.List<Double>[] fuelPoolSlotHistory = new java.util.List[6];
+    {
+        for (int i = 0; i < 6; i++) {
+            fuelPoolSlotHistory[i] = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        }
+    }
     private volatile String lastLimitingFuel = "";
     private volatile long lastLimitingPoolEU = -1L;
     private volatile long lastCyclesDemand = 0L;
@@ -750,14 +759,12 @@ public class PowerMonitorCoverBehavior {
         // in the cables. Smoothed inputs, clamped, ~labelled -- packet
         // aliasing leaves a couple EU/t of residue in this number.
         long absorbed = Math.round(emaTotalChargeSlope); // level-derived: alias-free, band-drift-correct
+        // MODEL v2: the loss ledger must CLOSE on the panel --
+        // Generation - Losses = Delivered, same frame, no lag. (A survivor
+        // EMA here read 21 while the frame's truth was 37, field-caught.)
         long lossRaw = Math.max(0L, emaGeneration - emaConsumption - absorbed);
-        // Difference of three signals -- noisiest number on the panel, and a
-        // momentary zero is noise, not "loss stopped". Own EMA without the
-        // zero-snap, then a plain deadband.
-        emaLineLoss = emaLineLoss < 0 ? lossRaw : emaLineLoss + Math.round((lossRaw - emaLineLoss) / 4.0);
-        if (Math.abs(emaLineLoss - shownLineLossEUt) >= Math.max(2L, shownLineLossEUt / 10L)) {
-            shownLineLossEUt = emaLineLoss;
-        }
+        emaLineLoss = lossRaw;
+        shownLineLossEUt = lossRaw;
 
         alertNearbyPlayers(hostTile, worldTime);
 
@@ -925,6 +932,42 @@ public class PowerMonitorCoverBehavior {
                 rows.add("\u00a78  \u2026 " + extra + " more generators");
             }
             genFuelRows = rows.toArray(new String[0]);
+        }
+        // Per-fuel pool recording (internals + shared) into stable slots.
+        {
+            java.util.Map<String, Long> pools = new java.util.LinkedHashMap<>();
+            for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
+                if (p.fuelName != null && !p.fuelName.isEmpty()) {
+                    pools.merge(displayFluidName(p.fuelName), p.fuelEU, Long::sum);
+                }
+            }
+            for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : lastSharedEUByFluid.entrySet()) {
+                pools.merge(displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1)
+                        .getLocalizedName()), e.getValue(), Long::sum);
+            }
+            for (java.util.Map.Entry<String, Long> e : pools.entrySet()) {
+                int slot = -1, free = -1;
+                for (int i = 0; i < 6; i++) {
+                    if (e.getKey().equals(fuelPoolSlotNames[i])) {
+                        slot = i;
+                        break;
+                    }
+                    if (free < 0 && fuelPoolSlotNames[i] == null) {
+                        free = i;
+                    }
+                }
+                if (slot < 0 && free >= 0) {
+                    slot = free;
+                    fuelPoolSlotNames[slot] = e.getKey();
+                }
+                if (slot >= 0) {
+                    java.util.List<Double> hist = fuelPoolSlotHistory[slot];
+                    hist.add((double) e.getValue());
+                    while (hist.size() > 96) {
+                        hist.remove(0);
+                    }
+                }
+            }
         }
         fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true, -1L);
         // MODEL v2: no override needed -- the per-gen readings sum to the
@@ -1624,9 +1667,38 @@ public class PowerMonitorCoverBehavior {
         if (!frameSegmentHazard.isEmpty()) {
             return frameSegmentHazard;
         }
-        int types = frameSegmentLines.size();
-        return types == 0 ? "" : "\u00a77Segments: \u00a7f" + types + " cable type" + (types == 1 ? "" : "s")
-                + " \u00a7a\u2713 rated for this network";
+        return ""; // clean segments are SILENT -- absence of warning is the message; census lives in the ? and diag
+    }
+
+    public java.util.List<Double> getFuelPoolSeries(int slot) {
+        return new java.util.ArrayList<>(fuelPoolSlotHistory[slot]);
+    }
+
+    public String getFuelPoolName(int slot) {
+        String n = fuelPoolSlotNames[slot];
+        return n == null ? "" : n;
+    }
+
+    /** Losses series derived per point: generation - delivered. */
+    public java.util.List<Double> getChartLosses() {
+        java.util.List<Double> g = getChartGeneration(), c = getChartConsumption();
+        java.util.List<Double> out = new java.util.ArrayList<>(Math.min(g.size(), c.size()));
+        for (int i = 0; i < Math.min(g.size(), c.size()); i++) {
+            out.add(Math.max(0, g.get(i) - c.get(i)));
+        }
+        return out;
+    }
+
+    /** Per-generator fuel rows for the collapsed FUEL hover-card. */
+    public String getGenRowTooltip(int i) {
+        String[] g = genFuelRows;
+        return i < g.length ? g[i] : "";
+    }
+
+    /** Shared reserve rows only (the always-visible FUEL residue). */
+    public String getSharedRow(int i) {
+        String[] shared = sharedFuelRows;
+        return i < shared.length ? shared[i] : "";
     }
 
     public String getCyclesLine() {
@@ -1648,10 +1720,13 @@ public class PowerMonitorCoverBehavior {
             for (String l : lastDemandLines) {
                 out.add("\u00a77  " + l);
             }
+            out.add("\u00a77Peaks: demand \u00a7f" + getPeakDemandEUt() + "\u00a77 \u00b7 drain \u00a7f"
+                    + getPeakDeficitEUt());
             out.add("\u00a77Generator contributions (network-side, same capture as the panel):");
             out.addAll(frameGenContribs);
         } else if ("loss".equals(key)) {
-            out.add("\u00a77loss = generation \u2212 delivered \u2212 \u0394storage");
+            out.add("\u00a77loss = generation \u2212 delivered \u2212 \u0394storage (same frame: \u00a7f"
+                    + emaGeneration + "\u00a77 \u2212 \u00a7f" + emaConsumption + "\u00a77)");
             out.add("\u00a77relay output toll: \u00a7f" + liveRelayTollEUt + "\u00a77 EU/t (buffers+transformers)");
             out.add("\u00a77battery slope: \u00a7f" + String.format("%.2f", emaBatterySlope) + "\u00a77 EU/t");
             out.add("\u00a77total-charge slope: \u00a7f" + String.format("%.2f", emaTotalChargeSlope) + "\u00a77 EU/t");
@@ -1659,6 +1734,8 @@ public class PowerMonitorCoverBehavior {
             for (String l : lastBufferLines) {
                 out.add("\u00a77  " + l);
             }
+            out.add("\u00a77flow: in \u00a7f" + emaBufferIn + "\u00a77 / out \u00a7f" + emaBufferOut
+                    + "\u00a77 EU/t");
             out.add("\u00a77battery slope \u00a7f" + String.format("%.2f", emaBatterySlope)
                     + "\u00a77 EU/t \u00b7 total slope \u00a7f" + String.format("%.2f", emaTotalChargeSlope));
         } else if ("ladder".equals(key)) {
@@ -1689,6 +1766,21 @@ public class PowerMonitorCoverBehavior {
                     if (l.contains(fluid)) {
                         out.add("\u00a77  " + l);
                     }
+                }
+            }
+        } else if (key.startsWith("shared:")) {
+            int j = Integer.parseInt(key.substring(7));
+            java.util.List<String> names = lastSharedNames;
+            String fluid = j >= 0 && j < names.size() ? names.get(j) : "?";
+            out.add("\u00a77Shared pool: \u00a7f" + fluid);
+            for (String l : lastProducersDiag) {
+                if (l.contains(fluid)) {
+                    out.add("\u00a77  " + l);
+                }
+            }
+            for (String l : lastReserveDiag) {
+                if (l.contains(fluid)) {
+                    out.add("\u00a77  " + l);
                 }
             }
         } else if ("segments".equals(key)) {

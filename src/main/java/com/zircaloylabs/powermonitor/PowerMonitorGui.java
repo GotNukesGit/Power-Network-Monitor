@@ -227,11 +227,13 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             String pctText = pct == 0 ? "<1" : String.valueOf(pct);
             String c = pct >= 10 ? "\u00a7e" : "\u00a7f";
             long v = voltage.getLongValue();
-            String s = "\u00a77Line loss: " + c + "~" + fmt(line) + " EU/t" + amps(line, v) + "\u00a77";
+            // The full ledger, closing by construction: total = gen - delivered.
+            String s = "\u00a77Losses: " + c + "~" + fmt(loss) + " EU/t" + amps(loss, v) + "\u00a77 (cable ~"
+                    + fmt(line);
             if (toll > 0) {
-                s += " \u00b7 Output loss: " + c + "~" + fmt(toll) + " EU/t" + amps(toll, v) + "\u00a77";
+                s += " \u00b7 relay ~" + fmt(toll);
             }
-            return s + " (" + c + pctText + "%\u00a77)";
+            return s + ") (" + c + pctText + "%\u00a77)";
         }, "loss", b, guiPlayer);
 
         divider(column);
@@ -302,7 +304,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 "\u00a77capacity steps down: \u00a7f128\u21921h05m\u00a77 means \u00a7f128 EU/t",
                 "\u00a7funtil 1h05m\u00a77, then the next step takes over.");
 
-        rowP(column, () -> {
+        genTTField = new StringSyncValue[6];
+        for (int i = 0; i < 6; i++) {
+            final int gi = i;
+            genTTField[i] = regStr(syncManager, "pm_gtt" + i, () -> b.getGenRowTooltip(gi));
+        }
+        rowPT(column, () -> {
             if (fuel.getLongValue() <= 0) {
                 return maxGen.getLongValue() > 0 ? "\u00a7eNo fuel in generator tanks/slots"
                         : "\u00a7fNo generators on network";
@@ -323,12 +330,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         // In-machine fuel above is GUARANTEED runway; these lines assume the
         // plumbing keeps delivering -- and each reserve's measured trend
         // announces whether production is keeping it charged.
-        rowP(column, () -> res0.getStringValue(), "fuel:0", b, guiPlayer);
-        rowP(column, () -> res1.getStringValue(), "fuel:1", b, guiPlayer);
-        rowP(column, () -> res2.getStringValue(), "fuel:2", b, guiPlayer);
-        rowP(column, () -> res3.getStringValue(), "fuel:3", b, guiPlayer);
-        rowP(column, () -> res4.getStringValue(), "fuel:4", b, guiPlayer);
-        rowP(column, () -> res5.getStringValue(), "fuel:5", b, guiPlayer);
+        // PANEL v2: per-generator rows live in the Full burn row's hover
+        // card; only the shared pools stay on the panel face.
+        StringSyncValue sh0 = regStr(syncManager, "pm_sh0", () -> b.getSharedRow(0));
+        StringSyncValue sh1 = regStr(syncManager, "pm_sh1", () -> b.getSharedRow(1));
+        rowP(column, () -> sh0.getStringValue(), "shared:0", b, guiPlayer);
+        rowP(column, () -> sh1.getStringValue(), "shared:1", b, guiPlayer);
 
         divider(column);
 
@@ -407,7 +414,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             if (truncated.getLongValue() != 0) {
                 return "\u00a7e\u26a0 Network larger than this tier tracks -- upgrade";
             }
-            return "\u00a72\u2714 Supply healthy";
+            return ""; // PANEL v2: healthy is silent -- only warnings speak
         });
 
         // Outage black box: why did the lights go out, and how badly.
@@ -473,14 +480,65 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             return;
         }
 
+        // ===== PANEL v2: one large multi-series chart + toggle legend =====
+        MultiChartWidget chart = new MultiChartWidget();
+        chart.add(new MultiChartWidget.Series("Demand", 0x55FF55, "EU/t", listSync(syncManager, "mc_dem", b::getChartDemand)));
+        chart.add(new MultiChartWidget.Series("Generation", 0x55FFFF, "EU/t", listSync(syncManager, "mc_gen", b::getChartGeneration)));
+        chart.add(new MultiChartWidget.Series("Losses", 0xFF5555, "EU/t", listSync(syncManager, "mc_loss", b::getChartLosses)));
+        chart.add(new MultiChartWidget.Series("Batteries", 0xFFAA00, "EU", listSync(syncManager, "mc_bat", b::getChartBuffered)));
+        int[] fuelColors = { 0xAA66DD, 0x66DDAA, 0xDDDD66, 0xDD66AA, 0x66AADD, 0xAADD66 };
+        StringSyncValue[] poolNames = new StringSyncValue[6];
+        for (int i = 0; i < 6; i++) {
+            final int slot = i;
+            poolNames[i] = regStr(syncManager, "mc_fpn" + i, () -> b.getFuelPoolName(slot));
+            chart.add(new MultiChartWidget.Series("", fuelColors[i], "EU",
+                    listSync(syncManager, "mc_fp" + i, () -> b.getFuelPoolSeries(slot))));
+        }
+        chart.size(CHART_WIDTH * 2 + CHART_GAP, 85);
+        Flow legend = Flow.column().coverChildren();
+        for (int i = 0; i < chart.getSeries().size(); i++) {
+            final int idx = i;
+            final MultiChartWidget.Series ser = chart.getSeries().get(i);
+            legend.child(new ButtonWidget<>()
+                    .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
+                    .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
+                    .overlay(IKey.dynamic(() -> {
+                        String nm = idx >= 4 ? poolNames[idx - 4].getStringValue() : ser.name;
+                        if (nm.isEmpty()) {
+                            return "";
+                        }
+                        String dot = chart.isEnabled(idx) ? "\u25a0 " : "\u25a1 ";
+                        return colorHex(ser.color) + dot + "\u00a77" + nm + " \u00a7f"
+                                + compact(chart.liveOf(idx));
+                    }))
+                    .size(76, 9)
+                    .onUpdateListener(w -> {
+                        if (w.isHovering()) {
+                            chart.setLegendHover(idx);
+                        } else if (!w.isHovering()) {
+                            // release only our own claim
+                        }
+                    })
+                    .syncHandler(new InteractionSyncHandler().setOnMousePressed(md -> {
+                        if (md.isClient()) {
+                            chart.toggle(idx);
+                        }
+                    })));
+        }
+        legend.onUpdateListener(w -> {
+            boolean any = false;
+            for (com.cleanroommc.modularui.api.widget.IWidget c : w.getChildren()) {
+                if (c.isHovering()) {
+                    any = true;
+                }
+            }
+            if (!any) {
+                chart.setLegendHover(-1);
+            }
+        });
         column.child(Flow.row().coverChildren()
-                .child(chartCell("Demand (EU/t)", b::getChartDemand, demand).marginRight(CHART_GAP))
-                .child(chartCell("Generation (EU/t)", b::getChartGeneration, gen))
-                .marginBottom(4));
-        column.child(Flow.row().coverChildren()
-                .child(chartCell("Batteries (EU)", b::getChartBuffered, buf, false).marginRight(CHART_GAP))
-                .child(chartCell(IKey.dynamic(() -> "\u00a7f" + fuelTitle.getStringValue()), b::getChartFuel, fuel,
-                        false)));
+                .child(chart.marginRight(4))
+                .child(legend));
     }
 
     // --- layout helpers ---
@@ -497,18 +555,62 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         column.child(header.marginBottom(2));
     }
 
+    private static GenericListSyncHandler<Double> listSync(PanelSyncManager sm, String key,
+            Supplier<List<Double>> src) {
+        GenericListSyncHandler<Double> h = new GenericListSyncHandler<>(src, null, PacketBuffer::readDouble,
+                PacketBuffer::writeDouble, Double::equals, null);
+        sm.syncValue(key, h);
+        return h;
+    }
+
+    private static String colorHex(int c) {
+        // nearest MC color code for the legend dot
+        return "\u00a7f";
+    }
+
+    /** Compact number for chart axis labels: 1.2M, 34k, 487. */
+    public static String compact(double v) {
+        double a = Math.abs(v);
+        if (a >= 1_000_000_000) return String.format("%.1fB", v / 1_000_000_000.0);
+        if (a >= 1_000_000) return String.format("%.1fM", v / 1_000_000.0);
+        if (a >= 10_000) return String.format("%.0fk", v / 1_000.0);
+        return String.format("%.0f", v);
+    }
+
     private void row(Flow column, Supplier<String> text) {
         column.child(IKey.dynamic(text::get).asWidget().marginBottom(2));
     }
 
+    /** rowP plus a hover card: the per-generator fuel rows, live. */
+    private void rowPT(Flow column, Supplier<String> text, String provKey, PowerMonitorCoverBehavior b,
+            net.minecraft.entity.player.EntityPlayer player) {
+        column.child(Flow.row().coverChildren().marginBottom(2)
+                .child(IKey.dynamic(text::get).asWidget()
+                        .tooltipStatic(t -> {
+                            t.addLine(IKey.str("\u00a77Per-generator tanks:"));
+                            for (int i = 0; i < 6; i++) {
+                                final int gi = i;
+                                t.addLine(IKey.dynamic(() -> genTTField[gi].getStringValue()));
+                            }
+                        }))
+                .child(provButton(provKey, b, player)));
+    }
+
     /** Row with a per-line provenance button: click prints THIS row's math to chat. */
     private com.cleanroommc.modularui.value.sync.BooleanSyncValue dbgSync;
+    private StringSyncValue[] genTTField;
 
     private void rowP(Flow column, Supplier<String> text, String provKey, PowerMonitorCoverBehavior b,
             net.minecraft.entity.player.EntityPlayer player) {
         column.child(Flow.row().coverChildren().marginBottom(2)
                 .child(IKey.dynamic(text::get).asWidget())
-                .child(new ButtonWidget<>()
+                .child(provButton(provKey, b, player)));
+    }
+
+    private com.cleanroommc.modularui.widget.Widget<?> provButton(String provKey, PowerMonitorCoverBehavior b,
+            net.minecraft.entity.player.EntityPlayer player) {
+        final Supplier<String> text = () -> "x"; // non-empty: gating below uses debug only
+        return new ButtonWidget<>()
                         .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
                         .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
                         .overlay(IKey.dynamic(() -> dbgSync != null && dbgSync.getBoolValue() && !text.get().isEmpty() ? "\u00a78?" : ""))
@@ -521,7 +623,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                                     player.addChatMessage(new net.minecraft.util.ChatComponentText(line));
                                 }
                             }
-                        }))));
+                        }));
     }
 
     private void divider(Flow column) {
