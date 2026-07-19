@@ -34,22 +34,27 @@ off reserves.
 
 ### <Color color="#FFAA00">Scene: the steam appetite</Color>
 
-<GameScene zoom={3} height="360" interactive={true}>
+<GameScene zoom={3} width="620" height="380" interactive={true}>
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:100,mFacing:3s}' x="0" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:101,mFacing:3s}' x="1" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:102,mFacing:3s}' x="2" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:105,mFacing:3s}' x="3" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:114,mFacing:3s}' x="4" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120,mFacing:3s}' x="1" y="0" z="2" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1121,mFacing:3s}' x="2" y="0" z="2" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:101,mFacing:3s}' x="2" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:102,mFacing:3s}' x="4" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:105,mFacing:3s}' x="6" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:114,mFacing:3s}' x="8" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120,mFacing:3s}' x="2" y="0" z="3" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1121,mFacing:3s}' x="6" y="0" z="3" />
   <BlockAnnotation pos="0 0 0" color="#80DD6644" thickness="2">
 
-**The boiler shelf** -- every early steam producer. **Hover each machine for its production rate** (the in-game tooltip states L of steam per second). Total your bank against the turbines' appetite below.
+**The boiler shelf** -- every early steam producer. **Hover each machine for its production rate** (the in-game tooltip states liters of steam per second). Total your bank against your turbines' appetite.
 
   </BlockAnnotation>
-  <BlockAnnotation pos="1 0 2" color="#8044DD66" thickness="2">
+  <BlockAnnotation pos="2 0 3" color="#8044DD66" thickness="2">
 
-**LV and MV Steam Turbines** -- the LV turbine needs a *sustained* **~1,500 L/s** for full output; the MV turbine several times that. Hover each for its own numbers. Underfed turbines don't complain -- they quietly under-produce.
+**LV Steam Turbine** -- 7 L of steam per 3 EU (85% efficiency). Full **32 EU/t** output needs a *sustained* **~1,500 L/s** (75 L/t). Underfed, it quietly makes less while looking busy.
+
+  </BlockAnnotation>
+  <BlockAnnotation pos="6 0 3" color="#80AA66DD" thickness="2">
+
+**MV Steam Turbine** -- 8 L of steam per 3 EU (75% efficiency). Full **128 EU/t** output needs a *sustained* **~6,800 L/s** (341 L/t) -- plan a serious boiler bank or a Large Boiler before relying on it.
 
   </BlockAnnotation>
 </GameScene>

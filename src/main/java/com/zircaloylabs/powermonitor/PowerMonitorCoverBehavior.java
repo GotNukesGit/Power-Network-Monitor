@@ -1055,6 +1055,19 @@ public class PowerMonitorCoverBehavior {
         // Producers: any multiblock whose output hatch the fluid walk
         // counted, currently running a recipe with fluid outputs.
         java.util.Map<String, Double> modeledProduction = new java.util.HashMap<>();
+        // The reworked coke oven outputs through its OWN hatch type with a
+        // private controller linkage -- standard mOutputHatches stays empty.
+        // Bridge by proximity: a visited coke hatch sits in its ovens'
+        // structure wall, so any running oven within a few blocks of one is
+        // a scoped producer (catches shared-hatch clusters whole).
+        java.util.List<int[]> cokeHatchCoords = new java.util.ArrayList<>();
+        for (net.minecraft.tileentity.TileEntity vt : scan.visitedTanks) {
+            if (vt instanceof gregtech.api.interfaces.tileentity.IGregTechTileEntity
+                    && ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) vt)
+                            .getMetaTileEntity() instanceof gregtech.api.metatileentity.implementations.MTEHatchCokeOven) {
+                cokeHatchCoords.add(new int[] { vt.xCoord, vt.yCoord, vt.zCoord });
+            }
+        }
         for (gregtech.api.metatileentity.implementations.MTEMultiBlockBase c : lastControllers) {
             if (c.mMaxProgresstime <= 0 || c.mOutputFluids == null) {
                 continue;
@@ -1064,6 +1077,18 @@ public class PowerMonitorCoverBehavior {
                 if (h != null && scan.visitedTanks.contains(h.getBaseMetaTileEntity())) {
                     scoped = true;
                     break;
+                }
+            }
+            if (!scoped && c instanceof gregtech.common.tileentities.machines.multi.MTECokeOven
+                    && c.getBaseMetaTileEntity() != null) {
+                int cx = c.getBaseMetaTileEntity().getXCoord();
+                int cy = c.getBaseMetaTileEntity().getYCoord();
+                int cz = c.getBaseMetaTileEntity().getZCoord();
+                for (int[] hc : cokeHatchCoords) {
+                    if (Math.abs(hc[0] - cx) + Math.abs(hc[1] - cy) + Math.abs(hc[2] - cz) <= 6) {
+                        scoped = true;
+                        break;
+                    }
                 }
             }
             if (!scoped) {
