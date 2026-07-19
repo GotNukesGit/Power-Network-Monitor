@@ -460,7 +460,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                 .child(chartCell("Generation (EU/t)", b::getChartGeneration, gen))
                 .marginBottom(4));
         column.child(Flow.row().coverChildren()
-                .child(chartCell("Storage (EU)", b::getChartBuffered, buf).marginRight(CHART_GAP))
+                .child(chartCell("Batteries (EU)", b::getChartBuffered, buf).marginRight(CHART_GAP))
                 .child(chartCell("Fuel reserve (EU)", b::getChartFuel, fuel)));
     }
 

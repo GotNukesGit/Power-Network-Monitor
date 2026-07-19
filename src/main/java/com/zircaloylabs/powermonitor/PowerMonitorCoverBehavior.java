@@ -745,15 +745,56 @@ public class PowerMonitorCoverBehavior {
         // current output.
         // Per-generator smoothing before the staircase is built -- see
         // GeneratorProfile javadoc for why raw per-machine rates flap.
-        java.util.List<long[]> smoothedProfile = new java.util.ArrayList<>(snap.generatorFuelProfile.size());
-        for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
+        // SHARE AUGMENTATION (this network only -- foreign burners on other
+        // grids drinking the same tanks are NOT modeled; the display says
+        // so): each member generator's runway gains its share of the shared
+        // reserves it can burn. Full-burn shares split by rated output;
+        // current-rate shares by live output (idle burners contend nothing),
+        // falling back to rated when everything idles.
+        int genN = snap.generatorFuelProfile.size();
+        long[] sharedByGenRated = new long[genN];
+        long[] sharedByGenCurrent = new long[genN];
+        for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : lastSharedEUByFluid.entrySet()) {
+            net.minecraftforge.fluids.FluidStack probe = new net.minecraftforge.fluids.FluidStack(e.getKey(), 1000);
+            long ratedSum = 0, currentSum = 0;
+            boolean[] burns = new boolean[genN];
+            for (int i = 0; i < genN; i++) {
+                NetworkDiscovery.Snapshot.GeneratorProfile p = snap.generatorFuelProfile.get(i);
+                Object mte = ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) p.source).getMetaTileEntity();
+                if (mte instanceof gregtech.api.metatileentity.implementations.MTEBasicGenerator
+                        && ((gregtech.api.metatileentity.implementations.MTEBasicGenerator) mte).getFuelValue(probe,
+                                true) > 0) {
+                    burns[i] = true;
+                    ratedSum += p.ratedEUt;
+                    currentSum += Math.max(0L, p.rawOutEUt);
+                }
+            }
+            for (int i = 0; i < genN; i++) {
+                if (!burns[i]) {
+                    continue;
+                }
+                NetworkDiscovery.Snapshot.GeneratorProfile p = snap.generatorFuelProfile.get(i);
+                if (ratedSum > 0) {
+                    sharedByGenRated[i] += e.getValue() * p.ratedEUt / ratedSum;
+                }
+                long curBasis = currentSum > 0 ? Math.max(0L, p.rawOutEUt) : p.ratedEUt;
+                long curSum = currentSum > 0 ? currentSum : ratedSum;
+                if (curSum > 0) {
+                    sharedByGenCurrent[i] += e.getValue() * curBasis / curSum;
+                }
+            }
+        }
+        java.util.List<long[]> smoothedProfile = new java.util.ArrayList<>(genN);
+        for (int i = 0; i < genN; i++) {
+            NetworkDiscovery.Snapshot.GeneratorProfile p = snap.generatorFuelProfile.get(i);
             Long avgAcc = accGenOut.get(p.source);
             long rawOut = (avgAcc != null && meterSampleCount > 0) ? avgAcc / meterSampleCount : p.rawOutEUt;
             long smoothOut = ema(genOutEma.getOrDefault(p.source, -1L), rawOut);
             genOutEma.put(p.source, smoothOut);
             long shownOut = applyDeadband(genOutShown.getOrDefault(p.source, 0L), smoothOut);
             genOutShown.put(p.source, shownOut);
-            smoothedProfile.add(new long[] { shownOut, p.ratedEUt, p.fuelEU });
+            smoothedProfile.add(new long[] { shownOut, p.ratedEUt, p.fuelEU + sharedByGenRated[i],
+                    p.fuelEU + sharedByGenCurrent[i] });
         }
         emaFuelReserve = ema(emaFuelReserve, snap.totalFuelReserveEU);
         shownFuelReserveEU = applyDeadband(shownFuelReserveEU, emaFuelReserve);
@@ -813,8 +854,10 @@ public class PowerMonitorCoverBehavior {
         genFuelRows = gr.toArray(new String[0]);
 
         if (history != null) {
-            history.record(rawConsumption, rawGeneration, liveDemandEUt, liveBufferedEU,
-                    liveFuelReserveEU, worldTime);
+            history.record(rawConsumption, rawGeneration, liveDemandEUt,
+                    Math.max(0L, liveBufferedEU - liveInternalEU), // BATTERIES only: the structural quantity
+                    liveFuelReserveEU + lastConnectedReserveEU, // RUNNABLE basis: in-machine + connected
+                    worldTime);
             java.util.List<Double> cons = new java.util.ArrayList<>(CHART_MAX_POINTS);
             java.util.List<Double> gen = new java.util.ArrayList<>(CHART_MAX_POINTS);
             java.util.List<Double> dem = new java.util.ArrayList<>(CHART_MAX_POINTS);
@@ -1255,21 +1298,29 @@ public class PowerMonitorCoverBehavior {
             while (!win.isEmpty() && worldTime - win.peekFirst()[0] > RESERVE_WINDOW_TICKS) {
                 win.pollFirst();
             }
-            double netRate = track[1];
+            double netRate;
             boolean windowed = false;
-            long[] oldest = win.peekFirst();
-            if (oldest != null && worldTime - oldest[0] >= 20L * 60) { // window meaningful after 1 min
-                double net = (total - oldest[1]) / ((worldTime - oldest[0]) / 20.0);
-                double tol = Math.max(2.0, Math.abs(net) * 0.5);
-                // MEASURE, don't classify: agreement picks the display. Fast
-                // and windowed agree = steady signal, show fast. Disagree =
-                // batch structure, the windowed net is the honest rate --
-                // UNLESS fast is significantly WORSE (sudden deterioration,
-                // snipped pipe): crashes surface in seconds regardless.
-                if (Math.abs(track[1] - net) > tol && track[1] >= net - tol) {
-                    netRate = net;
+            Double modeled = modeledNet.get(name);
+            if (modeled != null) {
+                // CENSUS-MODELED rate: production known from producers'
+                // recipes, consumption measured from the generator side.
+                // One stable number -- no switching to flap.
+                netRate = modeled;
+            } else {
+                // No recognized producers: 5-minute window alone (slow but
+                // stable).
+                netRate = 0.0;
+                long[] oldest = win.peekFirst();
+                if (oldest != null && worldTime - oldest[0] >= 20L * 60) {
+                    netRate = (total - oldest[1]) / ((worldTime - oldest[0]) / 20.0);
                     windowed = true;
                 }
+            }
+            // Deterioration override in both modes: a snipped pipe or dead
+            // producer must scream in seconds, not minutes.
+            if (track[1] < netRate - Math.max(5.0, Math.abs(netRate))) {
+                netRate = track[1];
+                windowed = false;
             }
             if (lines.size() < 2) {
                 lines.add(formatReserveLine(name, total, netRate, windowed));
@@ -1295,7 +1346,7 @@ public class PowerMonitorCoverBehavior {
     }
 
     private static String formatReserveLine(String name, long totalL, double slope, boolean windowed) {
-        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(" \u00a78(shared)\u00a77: \u00a7f")
+        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(" \u00a78(shared \u00b7 this network)\u00a77: \u00a7f")
                 .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(totalL))
                 .append(" L");
         double floor = Math.max(1.0, totalL / 50000.0);
@@ -1508,7 +1559,10 @@ public class PowerMonitorCoverBehavior {
         java.util.List<double[]> items = new java.util.ArrayList<>(); // {rateEUt, secondsUntilDry}
         for (long[] p : profile) {
             long rate = fullBurn ? p[1] : p[0];
-            long fuel = p[2];
+            // Basis-matched augmented fuel: [2] = internal + rated-split
+            // share of shared reserves, [3] = internal + current-usage
+            // split. Shares are THIS NETWORK's members only.
+            long fuel = fullBurn ? p[2] : p[3];
             if (rate <= 0 || fuel <= 0) {
                 continue; // idle or fuel-less generator contributes nothing to the fueled schedule
             }
