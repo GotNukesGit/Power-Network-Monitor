@@ -336,6 +336,10 @@ public final class NetworkDiscovery {
         /** Emission toll paid by fuel-less relays (buffers + transformers) -- real network loss. */
         public long relayOutputTollEUt = 0L;
 
+        /** Machines with a loaded recipe parked in the insufficient-energy state (mProgresstime < 0). */
+        public int starvedMachineCount = 0;
+        public final List<String> starvedNames = new ArrayList<>();
+
         /** Liters of fuel sitting INSIDE member generators, per fluid display name. */
         public final java.util.Map<String, Long> inMachineFuelMb = new java.util.LinkedHashMap<>();
 
@@ -604,6 +608,16 @@ public final class NetworkDiscovery {
                 snap.totalDemandEUt += machine.mEUt;
                 snap.demandMeteredCount++;
                 snap.demandLines.add(mte.getLocalName() + " @ " + where + " : " + machine.mEUt + " EU/t");
+                // Starvation is directly observable: insufficient energy
+                // parks progress at -100 (GT source line 601) while the
+                // recipe stays loaded. This is "a machine stopped for lack
+                // of power" -- the ground truth brownout is defined by.
+                if (machine.mProgresstime < 0) {
+                    snap.starvedMachineCount++;
+                    if (snap.starvedNames.size() < 3) {
+                        snap.starvedNames.add(mte.getLocalName());
+                    }
+                }
             } else {
                 snap.demandLines
                         .add(mte.getLocalName() + " @ " + where + " : " + machine.mEUt + " EU/t (disabled -- excluded)");
@@ -700,11 +714,33 @@ public final class NetworkDiscovery {
      * -- those controllers won't resolve. Standard energy hatches cover
      * the common case.
      */
-    public static MultiblockSummary resolveMultiblocks(World world, List<IBasicEnergyContainer> members) {
-        MultiblockSummary summary = new MultiblockSummary();
-        if (world == null) {
-            return summary;
+    /**
+     * One TE-list scan per pass: the world scan is the monitor's dominant
+     * cost on big bases, and the hatch-expansion fixpoint was re-running it
+     * per round (2-4x/s). Collect controllers once, resolve against the
+     * cached list as many times as the fixpoint needs.
+     */
+    public static List<MTEMultiBlockBase> collectControllers(World world) {
+        List<MTEMultiBlockBase> out = new ArrayList<>();
+        Object[] tileEntities = world.loadedTileEntityList.toArray();
+        for (Object obj : tileEntities) {
+            if (obj instanceof IGregTechTileEntity) {
+                IMetaTileEntity mte = ((IGregTechTileEntity) obj).getMetaTileEntity();
+                if (mte instanceof MTEMultiBlockBase) {
+                    out.add((MTEMultiBlockBase) mte);
+                }
+            }
         }
+        return out;
+    }
+
+    public static MultiblockSummary resolveMultiblocks(World world, List<IBasicEnergyContainer> members) {
+        return resolveMultiblocks(collectControllers(world), members, -1L);
+    }
+
+    public static MultiblockSummary resolveMultiblocks(List<MTEMultiBlockBase> allControllers,
+            List<IBasicEnergyContainer> members, long runnableEnergyEU) {
+        MultiblockSummary summary = new MultiblockSummary();
 
         java.util.Map<Object, IBasicEnergyContainer> ourHatches = new java.util.IdentityHashMap<>();
         for (IBasicEnergyContainer member : members) {
@@ -719,16 +755,7 @@ public final class NetworkDiscovery {
             return summary;
         }
 
-        Object[] tiles = world.loadedTileEntityList.toArray(); // same-thread snapshot, CME-free
-        for (Object te : tiles) {
-            if (!(te instanceof IGregTechTileEntity)) {
-                continue;
-            }
-            IMetaTileEntity mte = ((IGregTechTileEntity) te).getMetaTileEntity();
-            if (!(mte instanceof MTEMultiBlockBase)) {
-                continue;
-            }
-            MTEMultiBlockBase controller = (MTEMultiBlockBase) mte;
+        for (MTEMultiBlockBase controller : allControllers) {
 
             String name = null;
             for (MTEHatchEnergy hatch : controller.mEnergyHatches) {
@@ -760,7 +787,19 @@ public final class NetworkDiscovery {
             }
             summary.demandEUt += demand;
             if (demand > 0) {
-                summary.demandLines.add(name + " : " + demand + " EU/t (multiblock)");
+                String line = name + " : " + demand + " EU/t (multiblock";
+                // "How many more runs before power issues": total runnable
+                // energy (in-machine fuel + connected reserves as EU +
+                // batteries) over this recipe's energy-per-cycle. An
+                // approximation by construction -- assumes this recipe
+                // repeating at today's overhead -- and labeled as one.
+                if (runnableEnergyEU > 0 && controller.mMaxProgresstime > 0) {
+                    long perCycle = demand * controller.mMaxProgresstime;
+                    if (perCycle > 0) {
+                        line += " \u00b7 fuel for ~" + (runnableEnergyEU / perCycle) + " cycles";
+                    }
+                }
+                summary.demandLines.add(line + ")");
             } else if (!controllerAllowed && controller.mMaxProgresstime > 0) {
                 summary.demandLines.add(name + " (multiblock, disabled -- excluded)");
             }

@@ -9,7 +9,7 @@ navigation:
 
 Power never moves for free in GT. Cables charge per meter -- but even a
 lossless cable can't make transfer free, because **every emitter charges
-admission**: any block that puts EU onto a wire pays a toll to do it:
+admission**: any block that puts EU onto a wire pays a <Tooltip label="toll" tooltip="V + 2^(tier-1) EU per amp, decremented from the emitter's buffer while only V goes on the wire"/> to do it:
 
 <Latex formula="\text{paid} = V + 2^{\max(0,\ tier-1)} \quad\text{per amp, to emit } V"/>
 
@@ -24,19 +24,12 @@ voltage upgrades. It is charged on **every emission**: generators launching
 packets, battery buffers re-emitting them, transformers converting them.
 Three emitters in a chain = three tolls, *compounding*.
 
-<Mermaid>
-mindmap
-  root((Every EU generated))
-    Delivered to machines
-    Cable loss
-      per block, per amp
-    Output loss
-      Generators
-        paid from fuel -- invisible
-      Relays
-        buffers and transformers
-        paid from storage -- your batteries
-</Mermaid>
+| Where each EU goes | What that means | Who pays |
+|---|---|---|
+| **Delivered** | Reaches a machine and does work | -- |
+| **Cable loss** | Each packet sheds a few EU per cable block it crosses | dissipated in the wire |
+| **Output loss** (generators) | The emission toll, covered by burning extra fuel | invisible to the grid |
+| **Output loss** (relays) | Buffers and transformers have no fuel line -- their toll comes from stored energy | **your batteries** |
 
 ## Who actually pays
 
@@ -79,14 +72,21 @@ headroom (one extra generator drowns the toll) or **fewer emitter stages**
 
 ## Scene: the ledger rig
 
-*(Block IDs to be filled via /guidenhc editor -- they autocomplete.)*
+Every GT machine shares one block id (the tile data differentiates them), so
+the hulls below are generic -- the labels carry the meaning. Rotate and zoom.
 
-<Structure width="240" height="120">
-0 0 0 PLACEHOLDER_steam_turbine
-1 0 0 PLACEHOLDER_battery_buffer
-2 0 0 PLACEHOLDER_redstone_alloy_cable_4x
-3 0 0 PLACEHOLDER_lv_mv_transformer
-4 0 0 PLACEHOLDER_copper_cable
-5 0 0 PLACEHOLDER_mv_extruder
-</Structure>
+<GameScene zoom={3} interactive={true}>
+  <Block id="gregtech:gt.blockmachines" x="0" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" x="1" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" x="2" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" x="3" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" x="4" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" x="5" y="0" z="0" />
+  <BlockAnnotation pos="0 0 0" color="#8044DD66" thickness="2" alwaysOnTop="true">generators -- toll paid by fuel</BlockAnnotation>
+  <BlockAnnotation pos="1 0 0" color="#80FFAA00" thickness="2" alwaysOnTop="true">buffer -- pays 33 per 32, from batteries</BlockAnnotation>
+  <BlockAnnotation pos="2 0 0" color="#80AAAAAA" thickness="2" alwaysOnTop="true">4A lossless backbone</BlockAnnotation>
+  <BlockAnnotation pos="3 0 0" color="#80AA66DD" thickness="2" alwaysOnTop="true">transformer -- 1A MV ceiling</BlockAnnotation>
+  <BlockAnnotation pos="4 0 0" color="#80AAAAAA" thickness="2" alwaysOnTop="true">copper: -2 per block per amp</BlockAnnotation>
+  <BlockAnnotation pos="5 0 0" color="#80DD6644" thickness="2" alwaysOnTop="true">extruder -- 120 EU/t delivered</BlockAnnotation>
+</GameScene>
 

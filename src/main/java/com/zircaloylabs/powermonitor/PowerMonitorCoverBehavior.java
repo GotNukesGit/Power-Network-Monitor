@@ -44,6 +44,31 @@ public class PowerMonitorCoverBehavior {
     private double emaBatterySlope = 0.0; // EU/t
     private long liveRelayTollEUt = 0L;
     private boolean lastGenPinned = false; // shared with the outage tracker's headroom scaling
+
+    // ---- Victim-based brownout (operator-designed semantics) ----
+    // BROWNOUT means machines ACTUALLY stopping for lack of power (starved
+    // singleblocks + multi power-loss shutdowns), not demand-vs-delivered
+    // arithmetic -- measurement lag during recipe spin-up can't fake a
+    // victim. Alerting is ARMED only after 60s of clean operation
+    // (demand present, nobody starving), and re-arms the same way after
+    // each event. A step change in demand additionally holds the
+    // PREDICTIVE statuses (at-capacity / on-stored) for 10s so EMAs can
+    // converge before the panel worries about the future.
+    private int liveStarvedCount = 0;
+    private volatile java.util.List<String> liveStarvedNames = java.util.Collections.emptyList();
+    private int cleanOperationStreak = 0;
+    private boolean brownoutArmed = false;
+    private int demandStepGrace = 0;
+    private long prevDemandForStep = -1L;
+    private volatile long lastConnectedReserveEU = 0L;
+    private volatile java.util.List<String> lastReserveDiag = java.util.Collections.emptyList();
+    private final java.util.HashMap<String, java.util.ArrayDeque<long[]>> reserveWindows = new java.util.HashMap<>();
+    private static final long RESERVE_WINDOW_TICKS = 20L * 300; // 5 minutes
+    private int liveSupplyLines = 1;
+    private double emaPassMs = 0.0;
+    private double maxPassMs = 0.0;
+    private static final int ARM_AFTER_CLEAN_SAMPLES = 60;
+    private static final int DEMAND_STEP_GRACE_SAMPLES = 10;
     private volatile java.util.Map<String, Long> liveInMachineFuelMb = java.util.Collections.emptyMap();
     private boolean lastDiscoveryTruncated = false;
     private int lastCablesVisited = 0; // diagnostic, shown in chat readout while chasing the discovery bug
@@ -356,6 +381,7 @@ public class PowerMonitorCoverBehavior {
             return;
         }
         lastSampleWorldTime = worldTime;
+        long passStartNanos = System.nanoTime();
         int memberCountNow = meterTaps.size();
         if (memberCountNow == lastWarmupMemberCount) {
             censusStableStreak++;
@@ -397,6 +423,7 @@ public class PowerMonitorCoverBehavior {
 
         NetworkDiscovery.Result discovery = NetworkDiscovery.discover(hostTile, tier.maxTrackedNodes);
         lastDiscoveryTruncated = discovery.truncated;
+        liveSupplyLines = discovery.supplyLines;
         lastCablesVisited = discovery.cablesVisited;
 
         // Unify multi-hatch supply plants: a multiblock fed by hatches on
@@ -404,9 +431,11 @@ public class PowerMonitorCoverBehavior {
         // controllers, seed the walk from any of their hatches the BFS
         // never reached, and re-resolve -- iterated to a fixpoint (capped)
         // because a newly unified line can reveal further multiblocks.
+        java.util.List<gregtech.api.metatileentity.implementations.MTEMultiBlockBase> allControllers = NetworkDiscovery
+                .collectControllers(hostTile.getWorld());
         for (int round = 0; round < 3; round++) {
-            NetworkDiscovery.MultiblockSummary probe = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
-                    discovery.members);
+            NetworkDiscovery.MultiblockSummary probe = NetworkDiscovery.resolveMultiblocks(allControllers,
+                    discovery.members, -1L);
             boolean grew = false;
             java.util.HashSet<Object> memberSet = new java.util.HashSet<>(discovery.members);
             for (NetworkDiscovery.ControllerState state : probe.controllers) {
@@ -431,8 +460,10 @@ public class PowerMonitorCoverBehavior {
         // network (field-observed: "2 gen ... 484 / 256 (189%)" from a
         // 4-generator, 2-line plant).
         NetworkDiscovery.Snapshot snap = NetworkDiscovery.summarize(discovery.members);
-        NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(hostTile.getWorld(),
-                discovery.members);
+        long runnableEU = snap.totalFuelReserveEU + Math.max(0L, snap.totalBufferedEU - snap.internalBufferEU)
+                + lastConnectedReserveEU;
+        NetworkDiscovery.MultiblockSummary multis = NetworkDiscovery.resolveMultiblocks(allControllers,
+                discovery.members, runnableEU);
         rebuildMeterTaps(discovery.members, multis);
         lastMembers = discovery.members;
         java.util.List<String> dl = new java.util.ArrayList<>(snap.demandLines);
@@ -457,6 +488,30 @@ public class PowerMonitorCoverBehavior {
         liveInternalEU = snap.internalBufferEU;
         liveRelayTollEUt = snap.relayOutputTollEUt;
         liveInMachineFuelMb = snap.inMachineFuelMb;
+        liveStarvedCount = snap.starvedMachineCount;
+        liveStarvedNames = snap.starvedNames;
+        // Arming: a full minute of demand-present, nobody-starving operation.
+        if (liveDemandEUt > 0 && liveStarvedCount == 0) {
+            cleanOperationStreak++;
+        } else {
+            cleanOperationStreak = 0;
+        }
+        if (cleanOperationStreak >= ARM_AFTER_CLEAN_SAMPLES) {
+            brownoutArmed = true;
+        }
+        // (An event or an idle network zeroes the streak above, so a fresh
+        // clean minute is required to re-arm -- startup starvation stays
+        // silent by construction.)
+        // Demand step detection for the predictive-status grace.
+        if (prevDemandForStep >= 0) {
+            long delta = Math.abs(liveDemandEUt - prevDemandForStep);
+            if (delta > Math.max(8L, prevDemandForStep / 5)) {
+                demandStepGrace = DEMAND_STEP_GRACE_SAMPLES;
+            } else if (demandStepGrace > 0) {
+                demandStepGrace--;
+            }
+        }
+        prevDemandForStep = liveDemandEUt;
         liveInternalCapEU = snap.internalBufferCapacityEU;
         long batteryNow = Math.max(0L, liveBufferedEU - liveInternalEU);
         if (lastTotalCharge >= 0) {
@@ -513,8 +568,9 @@ public class PowerMonitorCoverBehavior {
         boolean genPinned = liveMaxGenerationEUt > 0 && liveGenerationEUt * 100 >= liveMaxGenerationEUt * 95;
         lastGenPinned = genPinned;
         int rawStatus;
-        if (liveUnmetEUt > 0) {
+        if (brownoutArmed && liveStarvedCount > 0) {
             rawStatus = STATUS_BROWNOUT;
+            brownoutArmed = false; // event consumed -- a fresh clean minute re-arms
         } else if (storageDrainEUt > shortfallFloor && liveBufferedEU > 0 && genPinned) {
             rawStatus = STATUS_ON_STORED;
         } else if (genPinned) {
@@ -532,7 +588,10 @@ public class PowerMonitorCoverBehavior {
         // gens with headroom + unmet = require 8 sustained samples (spin-ups
         // die in 3-5; chokes survive 8 easily). Both real failure modes stay
         // detectable; startup flashes don't.
-        int upSamplesNeeded = (rawStatus == STATUS_BROWNOUT && !genPinned) ? 8 : STATUS_UP_SAMPLES;
+        int upSamplesNeeded = rawStatus == STATUS_BROWNOUT ? 1 : STATUS_UP_SAMPLES; // victims are ground truth
+        if (demandStepGrace > 0 && rawStatus != STATUS_BROWNOUT) {
+            upSamplesNeeded = Integer.MAX_VALUE; // hold predictive escalations through the step grace
+        }
         if (rawStatus > shownStatus) {
             statusUpStreak++;
             statusDownStreak = 0;
@@ -610,6 +669,9 @@ public class PowerMonitorCoverBehavior {
         resetMeterAccumulators();
         pollFluidReserves(worldTime);
         trackOutage(worldTime);
+        double passMs = (System.nanoTime() - passStartNanos) / 1_000_000.0;
+        emaPassMs += (passMs - emaPassMs) / 16.0;
+        maxPassMs = Math.max(maxPassMs, passMs);
         trackControllerPowerLoss(multis, worldTime);
         if (lastPowerLossAlert != null) {
             broadcastNearby(hostTile, "\u00a76[Power Monitor] \u00a7c\u26a0 " + lastPowerLossAlert
@@ -729,7 +791,12 @@ public class PowerMonitorCoverBehavior {
         if (shownStatus > lastAlertedStatus && shownStatus >= STATUS_ON_STORED
                 && worldTime - lastAlertTime >= ALERT_MIN_INTERVAL_TICKS) {
             if (shownStatus >= STATUS_BROWNOUT) {
-                message = "\u00a76[Power Monitor] \u00a7c\u26a0 BROWNOUT -- demand exceeds supply!";
+                java.util.List<String> victims = liveStarvedNames;
+                String who = victims.isEmpty() ? "machines starving for power"
+                        : String.join(", ", victims) + (liveStarvedCount > victims.size()
+                                ? " +" + (liveStarvedCount - victims.size()) + " more"
+                                : "") + " starving for power";
+                message = "\u00a76[Power Monitor] \u00a7c\u26a0 BROWNOUT -- " + who + "!";
             } else {
                 long eta = storedEtaSeconds;
                 message = "\u00a76[Power Monitor] \u00a76\u26a0 Running on stored EU -- brownout in "
@@ -797,13 +864,13 @@ public class PowerMonitorCoverBehavior {
             outageOffStreak = 0;
             return;
         }
-        boolean shortfall = liveUnmetEUt > 0;
-        // Same headroom scaling as status escalation: generators pinned +
-        // unmet = real within 2s; generators with headroom + unmet is a
-        // spin-up unless it SURVIVES the ramp window (8s) -- recipe starts
-        // (especially multiblocks: demand appears in one tick, generation
-        // ramps over seconds) stop leaving phantom entries in the log.
-        int outageOnNeeded = lastGenPinned ? OUTAGE_ON : 8;
+        // Outage log rides the same ground truth as the brownout status:
+        // actual starved machines, not demand-vs-delivered arithmetic
+        // (measurement lag during spin-up can't fake a victim). The 60s
+        // arming lives in the status path; the log records any confirmed
+        // victim event so history stays complete.
+        boolean shortfall = liveStarvedCount > 0;
+        int outageOnNeeded = OUTAGE_ON;
         if (shortfall) {
             outageOnStreak++;
             outageOffStreak = 0;
@@ -876,6 +943,11 @@ public class PowerMonitorCoverBehavior {
         }
         reservePollCountdown = RESERVE_POLL_EVERY - 1;
         FluidReserves.Result scan = FluidReserves.scan(lastMembers, RESERVE_MAX_PIPES);
+        lastConnectedReserveEU = scan.totalReserveEU;
+        java.util.List<String> rd = new java.util.ArrayList<>(scan.tankLines);
+        rd.add(0, "\u00a77Fluid walk: \u00a7f" + scan.pipesVisited + "\u00a77 pipes, \u00a7f" + scan.tankLines.size()
+                + "\u00a77 tanks" + (scan.truncated ? " \u00a78(truncated)" : ""));
+        lastReserveDiag = rd;
         double dtSeconds = lastReservePollTime >= 0 ? Math.max(1.0, (worldTime - lastReservePollTime) / 20.0)
                 : -1.0;
         lastReservePollTime = worldTime;
@@ -911,15 +983,35 @@ public class PowerMonitorCoverBehavior {
             seen.add(name);
             double[] track = reserveTracks.computeIfAbsent(name, k -> new double[] { total, 0.0 });
             if (dtSeconds > 0) {
-                // Slope on the TOTAL: tank->machine transfers cancel out,
-                // so this reads pure production-minus-consumption -- smoother
-                // than tracking either store alone.
-                double slope = (total - track[0]) / dtSeconds;
+                double slope = (total - track[0]) / dtSeconds; // fast EMA: responsive
                 track[1] = track[1] == 0.0 ? slope : track[1] + (slope - track[1]) / 4.0;
             }
             track[0] = total;
+            // 5-minute window: batch producers (coke ovens) step over
+            // minutes; endpoints-over-window reads their true net rate.
+            java.util.ArrayDeque<long[]> win = reserveWindows.computeIfAbsent(name, k -> new java.util.ArrayDeque<>());
+            win.addLast(new long[] { worldTime, total });
+            while (!win.isEmpty() && worldTime - win.peekFirst()[0] > RESERVE_WINDOW_TICKS) {
+                win.pollFirst();
+            }
+            double netRate = track[1];
+            boolean windowed = false;
+            long[] oldest = win.peekFirst();
+            if (oldest != null && worldTime - oldest[0] >= 20L * 60) { // window meaningful after 1 min
+                double net = (total - oldest[1]) / ((worldTime - oldest[0]) / 20.0);
+                double tol = Math.max(2.0, Math.abs(net) * 0.5);
+                // MEASURE, don't classify: agreement picks the display. Fast
+                // and windowed agree = steady signal, show fast. Disagree =
+                // batch structure, the windowed net is the honest rate --
+                // UNLESS fast is significantly WORSE (sudden deterioration,
+                // snipped pipe): crashes surface in seconds regardless.
+                if (Math.abs(track[1] - net) > tol && track[1] >= net - tol) {
+                    netRate = net;
+                    windowed = true;
+                }
+            }
             if (lines.size() < 3) {
-                lines.add(formatReserveLine(name, total, track[1]));
+                lines.add(formatReserveLine(name, total, netRate, windowed));
             }
         }
         reserveTracks.keySet().retainAll(seen); // vanished fluids drop their tracks
@@ -941,17 +1033,18 @@ public class PowerMonitorCoverBehavior {
         return gtName;
     }
 
-    private static String formatReserveLine(String name, long totalL, double slope) {
+    private static String formatReserveLine(String name, long totalL, double slope, boolean windowed) {
         StringBuilder sb = new StringBuilder("\u00a77").append(name).append(": \u00a7f")
                 .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(totalL))
                 .append(" L");
         double floor = Math.max(1.0, totalL / 50000.0);
+        String win = windowed ? " (5m)" : "";
         if (slope > floor) {
-            sb.append(" \u00a77\u00b7 \u00a7a+").append(Math.round(slope)).append(" L/s");
+            sb.append(" \u00a77\u00b7 \u00a7a+").append(Math.round(slope)).append(" L/s").append(win);
         } else if (slope < -floor) {
             long eta = (long) (totalL / -slope);
-            sb.append(" \u00a77\u00b7 \u00a7c").append(Math.round(slope)).append(" L/s \u00a77~")
-                    .append(PowerMonitorCover.formatSeconds(eta));
+            sb.append(" \u00a77\u00b7 \u00a7c").append(Math.round(slope)).append(" L/s").append(win)
+                    .append(" \u00a77~").append(PowerMonitorCover.formatSeconds(eta));
         }
         return sb.toString();
     }
@@ -1003,6 +1096,12 @@ public class PowerMonitorCoverBehavior {
                     + NetworkDiscovery.coordsOf(m));
             shown++;
         }
+        out.add("\u00a77Fluids:");
+        for (String line : lastReserveDiag) {
+            out.add("\u00a77  " + line);
+        }
+        out.add(String.format("\u00a77Monitor cost: \u00a7f%.2f ms/s\u00a77 avg \u00b7 \u00a7f%.2f ms\u00a77 peak",
+                emaPassMs, maxPassMs));
         java.util.List<String> dl = lastDemandLines;
         out.add("\u00a77Demand contributors (" + dl.size() + "):");
         if (dl.isEmpty()) {
@@ -1165,6 +1264,11 @@ public class PowerMonitorCoverBehavior {
     /** Gross EU/t leaving network storage (deadband-smoothed). */
     public long getBufferOutEUt() {
         return shownBufferOutEUt;
+    }
+
+    /** 1 + foreign-hatch expansions: how many physically separate supply lines feed this network. */
+    public int getSupplyLines() {
+        return liveSupplyLines;
     }
 
     /** Emission toll currently paid by relays (buffers + transformers) -- the fuel-less output loss. */

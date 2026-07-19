@@ -13,9 +13,13 @@ evening of arguing with the instrument to understand. Where public
 documentation is imprecise, this guide states the exact rule and where it
 came from.
 
-**Who this is for:** the early-game player who has just built their first LV
-machines and wants to understand what the wires are actually doing -- before
-the first unexplained battery drain or machine explosion, rather than after.
+<details summary="Who this is for">
+
+The early-game player who has just built their first LV machines and wants to
+understand what the wires are actually doing -- before the first unexplained
+battery drain or machine explosion, rather than after.
+
+</details>
 
 ## Chapters
 

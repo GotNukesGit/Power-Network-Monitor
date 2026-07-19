@@ -59,6 +59,11 @@ public final class FluidReserves {
     public static final class Result {
         public final Map<Fluid, Long> litersByFluid = new LinkedHashMap<>();
         public boolean truncated = false;
+        /** EU-equivalent of all connected reserves, via each fluid's best burning generator. */
+        public long totalReserveEU = 0L;
+        /** Diagnostic: every counted tank ("Name @ x,y,z : fluid amounts"). */
+        public final java.util.List<String> tankLines = new java.util.ArrayList<>();
+        public int pipesVisited = 0;
     }
 
     public static Result scan(List<IBasicEnergyContainer> members, int maxPipes) {
@@ -133,6 +138,7 @@ public final class FluidReserves {
             }
         }
 
+        result.pipesVisited = visitedPipes.size();
         filterToBurnableFluids(result, members);
         return result;
     }
@@ -165,26 +171,57 @@ public final class FluidReserves {
         if (tanks == null) {
             return;
         }
+        StringBuilder diag = null;
         for (FluidTankInfo info : tanks) {
             if (info != null && info.fluid != null && info.fluid.getFluid() != null && info.fluid.amount > 0) {
                 result.litersByFluid.merge(info.fluid.getFluid(), (long) info.fluid.amount, Long::sum);
+                if (diag == null) {
+                    diag = new StringBuilder(tankName(te)).append(" @ ").append(te.xCoord).append(",")
+                            .append(te.yCoord).append(",").append(te.zCoord).append(" :");
+                }
+                diag.append(" ").append(info.fluid.getLocalizedName()).append(" ").append(info.fluid.amount).append("L");
             }
         }
+        if (diag != null && result.tankLines.size() < 16) {
+            result.tankLines.add(diag.toString());
+        }
+    }
+
+    private static String tankName(TileEntity te) {
+        if (te instanceof IGregTechTileEntity) {
+            IMetaTileEntity mte = ((IGregTechTileEntity) te).getMetaTileEntity();
+            if (mte != null) {
+                return mte.getLocalName();
+            }
+        }
+        return te.getClass().getSimpleName();
     }
 
     /** Keep only fluids that at least one connected generator can actually burn. */
     private static void filterToBurnableFluids(Result result, List<IBasicEnergyContainer> members) {
-        result.litersByFluid.keySet().removeIf(fluid -> {
-            FluidStack probe = new FluidStack(fluid, 1000);
+        java.util.Iterator<Map.Entry<Fluid, Long>> it = result.litersByFluid.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Fluid, Long> e = it.next();
+            FluidStack probe = new FluidStack(e.getKey(), 1000);
+            double bestEuPerMb = 0;
             for (IBasicEnergyContainer member : members) {
                 if (member instanceof IGregTechTileEntity) {
                     IMetaTileEntity mte = ((IGregTechTileEntity) member).getMetaTileEntity();
-                    if (mte instanceof MTEBasicGenerator && ((MTEBasicGenerator) mte).getFuelValue(probe, true) > 0) {
-                        return false; // burnable -- keep
+                    if (mte instanceof MTEBasicGenerator) {
+                        MTEBasicGenerator gen = (MTEBasicGenerator) mte;
+                        long euPerOp = gen.getFuelValue(probe, true);
+                        if (euPerOp > 0) {
+                            double perMb = euPerOp / (double) Math.max(1, gen.consumedFluidPerOperation(probe));
+                            bestEuPerMb = Math.max(bestEuPerMb, perMb);
+                        }
                     }
                 }
             }
-            return true; // nobody burns it -- drop
-        });
+            if (bestEuPerMb <= 0) {
+                it.remove(); // nobody burns it
+            } else {
+                result.totalReserveEU += Math.round(e.getValue() * bestEuPerMb);
+            }
+        }
     }
 }

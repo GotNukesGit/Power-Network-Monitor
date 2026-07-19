@@ -118,6 +118,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue internalCap = reg(syncManager, "pm_internalcap", b::getInternalCapacityEU);
         LongSyncValue voltage = reg(syncManager, "pm_voltage", b::getAnchorVoltage);
         LongSyncValue relayToll = reg(syncManager, "pm_relaytoll", b::getRelayTollEUt);
+        LongSyncValue supplyLines = reg(syncManager, "pm_supplylines", () -> (long) b.getSupplyLines());
         LongSyncValue secEmpty = reg(syncManager, "pm_secempty", b::getSecondsToEmpty);
         LongSyncValue secFull = reg(syncManager, "pm_secfull", b::getSecondsToFull);
         LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getFuelReserveEU);
@@ -215,13 +216,14 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             long toll = Math.min(loss, Math.max(0L, relayToll.getLongValue()));
             long line = loss - toll;
             long pct = 100L * loss / g;
+            String pctText = pct == 0 ? "<1" : String.valueOf(pct);
             String c = pct >= 10 ? "\u00a7e" : "\u00a7f";
             long v = voltage.getLongValue();
             String s = "\u00a77Line loss: " + c + "~" + fmt(line) + " EU/t" + amps(line, v) + "\u00a77";
             if (toll > 0) {
                 s += " \u00b7 Output loss: " + c + "~" + fmt(toll) + " EU/t" + amps(toll, v) + "\u00a77";
             }
-            return s + " (" + c + pct + "%\u00a77)";
+            return s + " (" + c + pctText + "%\u00a77)";
         });
 
         divider(column);
@@ -342,6 +344,14 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
             String line = top0.getStringValue();
             return line.isEmpty() ? "\u00a77Top draw: \u00a7fnone" : "\u00a77Top draw: \u00a7f" + line;
         });
+        // Network-scope peaks (moved from the per-segment cable row).
+        row(column, () -> {
+            String s = "\u00a77Peak demand: \u00a7f" + fmt(peakDemand.getLongValue());
+            if (bufCap.getLongValue() > 0) { // storage drain meaningless without storage
+                s += "\u00a77  Peak drain: \u00a7f" + fmt(peakDrain.getLongValue());
+            }
+            return s;
+        });
         row(column, () -> {
             String line = top1.getStringValue();
             return line.isEmpty() ? "" : "\u00a77         \u00a7f" + line;
@@ -352,10 +362,14 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         });
 
         row(column, () -> {
-            String s = "\u00a77This cable: \u00a7f" + fmt(cable.getLongValue()) + "\u00a77 EU/t max  Peak demand: \u00a7f"
-                    + fmt(peakDemand.getLongValue());
-            if (bufCap.getLongValue() > 0) { // "drain" is storage drain by definition -- meaningless without storage
-                s += "\u00a77  Peak drain: \u00a7f" + fmt(peakDrain.getLongValue());
+            // Per-SEGMENT rating only -- network-scope stats (peaks) live in
+            // NETWORK. Field-confirmed confusion: "cable 256 / peak demand
+            // 480" read as 187% overload when the flow actually splits
+            // across supply lines.
+            String s = "\u00a77This cable: \u00a7f" + fmt(cable.getLongValue()) + "\u00a77 EU/t max";
+            long lines = supplyLines.getLongValue();
+            if (lines > 1) {
+                s += "  \u00a781 of " + lines + " supply lines";
             }
             return s;
         });
@@ -366,7 +380,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         row(column, () -> {
             long st = status.getLongValue();
             if (st >= 3) {
-                return "\u00a7c\u26a0 BROWNOUT -- demand exceeds supply";
+                return "\u00a7c\u26a0 BROWNOUT -- machines starving for power";
             }
             if (st == 2) {
                 long eta = storedEta.getLongValue();

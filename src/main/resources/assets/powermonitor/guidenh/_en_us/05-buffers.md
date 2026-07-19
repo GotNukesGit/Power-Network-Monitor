@@ -8,7 +8,7 @@ navigation:
 # Battery Buffers
 
 A battery buffer holds energy in two places: the **batteries** in its slots
--- the real reserve -- and the buffer block's own small **holding tank**
+-- the real reserve -- and the buffer block's own small <Tooltip label="holding tank" tooltip="The buffer BLOCK's internal store (2,048 EU per slot at LV) that packets flow through -- shown as 'tank' on the Power Monitor. Not your batteries"/>
 (2,048 EU per slot at LV; this is the buffer's tank, not the machine buffers
 from the [Machines](03-machines.md) chapter). Packets moving through the
 buffer flow through the holding tank; the batteries only get involved at
