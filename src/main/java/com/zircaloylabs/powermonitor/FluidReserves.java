@@ -65,6 +65,9 @@ public final class FluidReserves {
         public final Map<Fluid, Long> euByFluid = new LinkedHashMap<>();
         /** Diagnostic: every counted tank ("Name @ x,y,z : fluid amounts"). */
         public final java.util.List<String> tankLines = new java.util.ArrayList<>();
+        /** Identity set of counted tank tiles -- producer scoping checks output hatches against this. */
+        public final java.util.Set<TileEntity> visitedTanks = java.util.Collections
+                .newSetFromMap(new java.util.IdentityHashMap<>());
         public int pipesVisited = 0;
     }
 
@@ -155,6 +158,7 @@ public final class FluidReserves {
         if (!(te instanceof IFluidHandler) || memberSet.contains(te) || !countedTanks.add(te)) {
             return;
         }
+        result.visitedTanks.add(te);
         // FOREIGN MACHINES ARE NOT TANKS. A generator or processing machine
         // belonging to some OTHER network is also an IFluidHandler -- its
         // internal fuel/recipe fluid is its own, not our reserve.

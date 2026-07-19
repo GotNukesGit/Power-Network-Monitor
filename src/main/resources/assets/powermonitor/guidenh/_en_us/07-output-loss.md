@@ -77,38 +77,42 @@ The rig from the ledger above, faithfully: four LV generators through two
 buffers onto a lossless backbone, stepped up to MV, delivered through copper.
 **Hover any block** for its stage's role and toll. Rotate and zoom.
 
-<GameScene zoom={3.5} height={340} interactive={true}>
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="0" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="1" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="0" y="0" z="2" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120}' x="1" y="0" z="2" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:191}' x="2" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:191}' x="2" y="0" z="2" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653}' x="3" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653}' x="3" y="0" z="1" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653}' x="3" y="0" z="2" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:21}' x="4" y="0" z="1" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1366}' x="5" y="0" z="1" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1366}' x="6" y="0" z="1" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:282}' x="7" y="0" z="1" />
-  <BlockAnnotation pos="0 0 0" color="#8044DD66" thickness="2">
+<GameScene zoom={3} height="380" interactive={true}>
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120,mFacing:5s}' x="-1" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120,mFacing:3s}' x="0" y="0" z="-1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653,mConnections:52b}' x="0" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653,mConnections:48b}' x="1" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:191,mFacing:5s}' x="2" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653,mConnections:56b}' x="3" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120,mFacing:5s}' x="-1" y="0" z="2" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120,mFacing:2s}' x="0" y="0" z="3" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653,mConnections:56b}' x="0" y="0" z="2" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653,mConnections:48b}' x="1" y="0" z="2" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:191,mFacing:5s}' x="2" y="0" z="2" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653,mConnections:52b}' x="3" y="0" z="2" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653,mConnections:44b}' x="3" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:21,mFacing:5s}' x="4" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1366,mConnections:48b}' x="5" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1366,mConnections:48b}' x="6" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:282,mFacing:4s}' x="7" y="0" z="1" />
+  <BlockAnnotation pos="-1 0 0" color="#8044DD66" thickness="2">
 
-**LV Generator (x4)** -- each emits 32 EU/t at 1A and pays **33 from fuel** per amp. Fuel-paid toll: invisible to the grid.
+**LV Generator (x4)** -- each on its cable, emitting 32 EU/t at 1A and paying **33 from fuel** per amp. Fuel-paid toll: invisible to the grid.
 
   </BlockAnnotation>
   <BlockAnnotation pos="2 0 0" color="#80FFAA00" thickness="2">
 
-**Battery Buffer (x2)** -- re-emits at **33 paid per 32 delivered**. No fuel line, so the toll drains **storage**. This stage is the ledger's missing ~1.7 EU/t.
+**Battery Buffer (x2)** -- re-emits at **33 paid per 32 delivered**. No fuel line: the toll drains **storage**. This stage is the ledger's missing ~1.7 EU/t.
 
   </BlockAnnotation>
   <BlockAnnotation pos="3 0 1" color="#80AAAAAA" thickness="2">
 
-**Redstone Alloy backbone** -- 4A, loss 0. Lossless cable, but the *emitters* feeding it still pay their tolls.
+**Redstone Alloy backbone** -- 4A, loss 0. Lossless cable; the *emitters* feeding it still pay their tolls.
 
   </BlockAnnotation>
   <BlockAnnotation pos="4 0 1" color="#80AA66DD" thickness="2">
 
-**LV/MV Transformer (step-up)** -- conversion is 1:1, emission pays **130 per 128**. Output ceiling: 1A of MV.
+**LV/MV Transformer (step-up)** -- dot face toward the MV side. Conversion 1:1; emission pays **130 per 128**. Ceiling: 1A of MV.
 
   </BlockAnnotation>
   <BlockAnnotation pos="5 0 1" color="#80AAAAAA" thickness="2">

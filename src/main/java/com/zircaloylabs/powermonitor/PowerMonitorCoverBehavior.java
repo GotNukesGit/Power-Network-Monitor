@@ -64,6 +64,11 @@ public class PowerMonitorCoverBehavior {
     private volatile java.util.List<String> lastReserveDiag = java.util.Collections.emptyList();
     private volatile java.util.Map<net.minecraftforge.fluids.Fluid, Long> lastSharedEUByFluid = java.util.Collections
             .emptyMap();
+    /** Controllers collected this pass -- reused by the reserve poll for producer scoping. */
+    private java.util.List<gregtech.api.metatileentity.implementations.MTEMultiBlockBase> lastControllers = java.util.Collections
+            .emptyList();
+    private java.util.List<NetworkDiscovery.Snapshot.GeneratorProfile> lastGeneratorProfiles = java.util.Collections
+            .emptyList();
     private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
     private volatile String[] sharedFuelRows = new String[0]; // connected pipe/tank pools, 10 s
     private volatile String cyclesLine = "";
@@ -438,6 +443,7 @@ public class PowerMonitorCoverBehavior {
         // because a newly unified line can reveal further multiblocks.
         java.util.List<gregtech.api.metatileentity.implementations.MTEMultiBlockBase> allControllers = NetworkDiscovery
                 .collectControllers(hostTile.getWorld());
+        lastControllers = allControllers;
         for (int round = 0; round < 3; round++) {
             NetworkDiscovery.MultiblockSummary probe = NetworkDiscovery.resolveMultiblocks(allControllers,
                     discovery.members, -1L);
@@ -536,6 +542,7 @@ public class PowerMonitorCoverBehavior {
         liveInternalEU = snap.internalBufferEU;
         liveRelayTollEUt = snap.relayOutputTollEUt;
         liveInMachineFuelMb = snap.inMachineFuelMb;
+        lastGeneratorProfiles = snap.generatorFuelProfile;
         liveStarvedCount = snap.starvedMachineCount;
         liveStarvedNames = snap.starvedNames;
         // Arming: a full minute of demand-present, nobody-starving operation.
@@ -1045,6 +1052,65 @@ public class PowerMonitorCoverBehavior {
         FluidReserves.Result scan = FluidReserves.scan(lastMembers, RESERVE_MAX_PIPES);
         lastConnectedReserveEU = scan.totalReserveEU;
         lastSharedEUByFluid = scan.euByFluid;
+        // Producers: any multiblock whose output hatch the fluid walk
+        // counted, currently running a recipe with fluid outputs.
+        java.util.Map<String, Double> modeledProduction = new java.util.HashMap<>();
+        for (gregtech.api.metatileentity.implementations.MTEMultiBlockBase c : lastControllers) {
+            if (c.mMaxProgresstime <= 0 || c.mOutputFluids == null) {
+                continue;
+            }
+            boolean scoped = false;
+            for (gregtech.api.metatileentity.implementations.MTEHatchOutput h : c.mOutputHatches) {
+                if (h != null && scan.visitedTanks.contains(h.getBaseMetaTileEntity())) {
+                    scoped = true;
+                    break;
+                }
+            }
+            if (!scoped) {
+                continue;
+            }
+            for (net.minecraftforge.fluids.FluidStack fs : c.mOutputFluids) {
+                if (fs != null && fs.amount > 0) {
+                    modeledProduction.merge(displayFluidName(fs.getLocalizedName()),
+                            fs.amount * 20.0 / c.mMaxProgresstime, Double::sum);
+                }
+            }
+        }
+        // Measured consumption per fluid: each burning generator's fuel-side
+        // EU rate over its verified EU-per-liter.
+        java.util.Map<String, Double> consumption = new java.util.HashMap<>();
+        for (NetworkDiscovery.Snapshot.GeneratorProfile p : lastGeneratorProfiles) {
+            if (p.fuelName == null || p.fuelName.isEmpty() || p.rawOutEUt <= 0) {
+                continue;
+            }
+            Object mte = ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) p.source).getMetaTileEntity();
+            if (!(mte instanceof gregtech.api.metatileentity.implementations.MTEBasicGenerator)) {
+                continue;
+            }
+            gregtech.api.metatileentity.implementations.MTEBasicGenerator gen = (gregtech.api.metatileentity.implementations.MTEBasicGenerator) mte;
+            net.minecraftforge.fluids.FluidStack tank = gen.mFluid;
+            if (tank == null) {
+                continue;
+            }
+            long euPerOp = gen.getFuelValue(tank, true);
+            long mbPerOp = Math.max(1, gen.consumedFluidPerOperation(tank));
+            if (euPerOp > 0) {
+                consumption.merge(displayFluidName(p.fuelName), p.rawOutEUt * 20.0 * mbPerOp / euPerOp, Double::sum);
+            }
+        }
+        java.util.Map<String, Double> netMap = new java.util.HashMap<>();
+        for (java.util.Map.Entry<String, Double> e : modeledProduction.entrySet()) {
+            netMap.merge(e.getKey(), e.getValue(), Double::sum);
+        }
+        for (java.util.Map.Entry<String, Double> e : consumption.entrySet()) {
+            // Consumption alone doesn't opt a fluid into modeled mode --
+            // only recognized production does; but where production is
+            // modeled, subtract the measured burn.
+            if (netMap.containsKey(e.getKey())) {
+                netMap.merge(e.getKey(), -e.getValue(), Double::sum);
+            }
+        }
+        java.util.Map<String, Double> modeledNet = netMap;
         java.util.List<String> rd = new java.util.ArrayList<>(scan.tankLines);
         rd.add(0, "\u00a77Fluid walk: \u00a7f" + scan.pipesVisited + "\u00a77 pipes, \u00a7f" + scan.tankLines.size()
                 + "\u00a77 tanks" + (scan.truncated ? " \u00a78(truncated)" : ""));

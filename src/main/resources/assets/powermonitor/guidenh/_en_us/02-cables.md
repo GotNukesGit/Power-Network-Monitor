@@ -45,20 +45,26 @@ See [Reference Tables](99-tables.md) for every ULV-MV cable's verified stats.
 
 A 4x trunk stepping down to 1x branches. **Hover each cable.**
 
-<GameScene zoom={3.5} height={300} interactive={true}>
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1248}' x="0" y="0" z="1" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1248}' x="1" y="0" z="1" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246}' x="2" y="0" z="0" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246}' x="2" y="0" z="1" />
-  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246}' x="2" y="0" z="2" />
+<GameScene zoom={3.5} height="360" interactive={true}>
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1248,mConnections:48b}' x="0" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1248,mConnections:48b}' x="1" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246,mConnections:28b}' x="2" y="0" z="1" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246,mConnections:40b}' x="2" y="0" z="0" />
+  <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246,mConnections:4b}' x="2" y="0" z="2" />
+  <Block id="minecraft:fire" x="3" y="0" z="0" />
   <BlockAnnotation pos="0 0 1" color="#80FFAA00" thickness="2">
 
-**Tin 4x cable** -- carries 4 amps (sizes multiply the base). The trunk.
+**Tin 4x trunk** -- 4 amps (sizes multiply the base).
 
   </BlockAnnotation>
-  <BlockAnnotation pos="2 0 1" color="#80DD6644" thickness="2">
+  <BlockAnnotation pos="2 0 2" color="#8044DD66" thickness="2">
 
-**Tin 1x branches** -- 1 amp each. If the trunk pushes more than 1A down a single branch for ~2 seconds sustained, **the branch burns, not the trunk** -- fire finds the under-rated segment.
+**Tin 1x branch** -- 1 amp. Healthy while its draw stays under rating.
+
+  </BlockAnnotation>
+  <BlockAnnotation pos="3 0 0" color="#80DD4444" thickness="2">
+
+**The overdrawn branch.** Sustained (~2s) draw above 1A ignites the *under-rated segment* -- the branch burns, never the trunk. The fire it starts then spreads like any fire, so a burning branch can take its surroundings with it.
 
   </BlockAnnotation>
 </GameScene>
