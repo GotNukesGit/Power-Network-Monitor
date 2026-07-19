@@ -167,6 +167,9 @@ public final class FluidReserves {
         // super/quantum tanks, Railcraft) don't descend from these classes.
         if (te instanceof IGregTechTileEntity) {
             IMetaTileEntity mte = ((IGregTechTileEntity) te).getMetaTileEntity();
+            if (mte instanceof gregtech.api.metatileentity.implementations.MTECable) {
+                return; // power cables are IFluidHandlers by inheritance only -- not tanks
+            }
             if (mte instanceof MTEBasicGenerator
                     || mte instanceof gregtech.api.metatileentity.implementations.MTEBasicMachine
                     || mte instanceof gregtech.api.metatileentity.implementations.MTEMultiBlockBase) {

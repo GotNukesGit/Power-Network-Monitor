@@ -69,6 +69,9 @@ public class PowerMonitorCoverBehavior {
             .emptyList();
     private java.util.List<NetworkDiscovery.Snapshot.GeneratorProfile> lastGeneratorProfiles = java.util.Collections
             .emptyList();
+    /** Per-producer measured rate memory: {L-per-sec, lastSeenRunningWorldTime} -- smooths async recipe gaps. */
+    private final java.util.IdentityHashMap<Object, java.util.Map<String, double[]>> producerRateMemory = new java.util.IdentityHashMap<>();
+    private static final long PRODUCER_IDLE_GRACE_TICKS = 20L * 30;
     private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
     private volatile String[] sharedFuelRows = new String[0]; // connected pipe/tank pools, 10 s
     private volatile String cyclesLine = "";
@@ -1074,8 +1077,10 @@ public class PowerMonitorCoverBehavior {
             }
         }
         for (gregtech.api.metatileentity.implementations.MTEMultiBlockBase c : lastControllers) {
-            if (c.mMaxProgresstime <= 0 || c.mOutputFluids == null) {
-                continue;
+            boolean runningNow = c.mMaxProgresstime > 0 && c.mOutputFluids != null;
+            boolean allowed = c.getBaseMetaTileEntity() != null && c.getBaseMetaTileEntity().isAllowedToWork();
+            if (!runningNow && !(allowed && producerRateMemory.containsKey(c))) {
+                continue; // never seen producing, or malleted off
             }
             boolean scoped = false;
             for (gregtech.api.metatileentity.implementations.MTEHatchOutput h : c.mOutputHatches) {
@@ -1106,13 +1111,29 @@ public class PowerMonitorCoverBehavior {
             if (!scoped) {
                 continue;
             }
-            for (net.minecraftforge.fluids.FluidStack fs : c.mOutputFluids) {
-                if (fs != null && fs.amount > 0) {
-                    modeledProduction.merge(displayFluidName(fs.getLocalizedName()),
-                            fs.amount * 20.0 / c.mMaxProgresstime, Double::sum);
+            java.util.Map<String, double[]> mem = producerRateMemory.computeIfAbsent(c,
+                    k -> new java.util.HashMap<>());
+            if (runningNow) {
+                // Record this producer's measured recipe rate; the memory
+                // carries it across the brief between-recipe gap so async
+                // ovens polled at random phases don't make the total flap
+                // (field-observed: +18..+63 L/s from a steady 8-oven wall).
+                for (net.minecraftforge.fluids.FluidStack fs : c.mOutputFluids) {
+                    if (fs != null && fs.amount > 0) {
+                        mem.put(displayFluidName(fs.getLocalizedName()),
+                                new double[] { fs.amount * 20.0 / c.mMaxProgresstime, worldTime });
+                    }
+                }
+            }
+            for (java.util.Map.Entry<String, double[]> e : mem.entrySet()) {
+                double[] v = e.getValue();
+                if (runningNow || worldTime - v[1] <= PRODUCER_IDLE_GRACE_TICKS) {
+                    modeledProduction.merge(e.getKey(), v[0], Double::sum);
                 }
             }
         }
+        // Forget producers that vanished from the world scan entirely.
+        producerRateMemory.keySet().retainAll(new java.util.HashSet<Object>(lastControllers));
         // Measured consumption per fluid: each burning generator's fuel-side
         // EU rate over its verified EU-per-liter.
         java.util.Map<String, Double> consumption = new java.util.HashMap<>();
