@@ -77,7 +77,7 @@ The rig from the ledger above, faithfully: four LV generators through two
 buffers onto a lossless backbone, stepped up to MV, delivered through copper.
 **Hover any block** for its stage's role and toll. Rotate and zoom.
 
-<GameScene zoom={3} height="380" interactive={true}>
+<GameScene zoom={3} width="700" height="380" interactive={true}>
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120,mFacing:5s}' x="-1" y="0" z="0" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaTileEntity",mID:1120,mFacing:3s}' x="0" y="0" z="-1" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:30653,mConnections:52b}' x="0" y="0" z="0" />

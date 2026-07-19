@@ -52,8 +52,6 @@ A 4x trunk stepping down to 1x branches. **Hover each cable.**
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246,mConnections:40b}' x="2" y="0" z="0" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246,mConnections:48b}' x="3" y="0" z="0" />
   <Block id="gregtech:gt.blockmachines" nbt='{id:"BaseMetaPipeEntity",mID:1246,mConnections:4b}' x="2" y="0" z="2" />
-  <Block id="minecraft:netherrack" x="4" y="0" z="0" />
-  <Block id="minecraft:fire" x="4" y="1" z="0" />
   <BlockAnnotation pos="0 0 1" color="#80FFAA00" thickness="2">
 
 **Tin 4x trunk** -- 4 amps (sizes multiply the base). The thick run.
@@ -64,9 +62,9 @@ A 4x trunk stepping down to 1x branches. **Hover each cable.**
 **The junction** -- 1x tin branches split off here at 1 amp each. Thin cables render thin: the wisps leaving this block are the branches.
 
   </BlockAnnotation>
-  <BlockAnnotation pos="4 1 0" color="#80DD4444" thickness="2">
+  <BlockAnnotation pos="3 0 0" color="#80DD4444" thickness="2">
 
-**Where it ends.** Sustained (~2s) draw above 1A ignites the *under-rated segment* -- the branch burns, never the trunk. The fire it starts then spreads like any fire and can take the surroundings with it.
+**The overdrawn branch.** Sustained (~2s) draw above 1A ignites the *under-rated segment* -- this branch burns, never the trunk. The fire it starts then spreads like any fire.
 
   </BlockAnnotation>
 </GameScene>

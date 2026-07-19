@@ -177,18 +177,21 @@ public final class FluidReserves {
         if (tanks == null) {
             return;
         }
-        StringBuilder diag = null;
+        StringBuilder diag = new StringBuilder(tankName(te)).append(" @ ").append(te.xCoord).append(",")
+                .append(te.yCoord).append(",").append(te.zCoord).append(" :");
+        boolean any = false;
         for (FluidTankInfo info : tanks) {
             if (info != null && info.fluid != null && info.fluid.getFluid() != null && info.fluid.amount > 0) {
                 result.litersByFluid.merge(info.fluid.getFluid(), (long) info.fluid.amount, Long::sum);
-                if (diag == null) {
-                    diag = new StringBuilder(tankName(te)).append(" @ ").append(te.xCoord).append(",")
-                            .append(te.yCoord).append(",").append(te.zCoord).append(" :");
-                }
                 diag.append(" ").append(info.fluid.getLocalizedName()).append(" ").append(info.fluid.amount).append("L");
+                any = true;
             }
         }
-        if (diag != null && result.tankLines.size() < 16) {
+        if (!any) {
+            diag.append(" (empty)"); // visited-but-empty handlers matter: a coke hatch is a
+                                     // serving window whose fluid lives in the ovens behind it
+        }
+        if (result.tankLines.size() < 16) {
             result.tankLines.add(diag.toString());
         }
     }
