@@ -1275,6 +1275,7 @@ public class PowerMonitorCoverBehavior {
         // Producers: any multiblock whose output hatch the fluid walk
         // counted, currently running a recipe with fluid outputs.
         java.util.Map<String, Double> modeledProduction = new java.util.HashMap<>();
+        java.util.Map<net.minecraftforge.fluids.Fluid, Long> ovenInternals = new java.util.HashMap<>();
         java.util.List<String> producersDiag = new java.util.ArrayList<>();
         // The reworked coke oven outputs through its OWN hatch type with a
         // private controller linkage -- standard mOutputHatches stays empty.
@@ -1364,6 +1365,9 @@ public class PowerMonitorCoverBehavior {
                         .getFluid();
                 if (brew2 != null) {
                     pd.append("\u00b7 int ").append(brew2.amount).append("L");
+                    if (brew2.amount > 0 && brew2.getFluid() != null) {
+                        ovenInternals.merge(brew2.getFluid(), (long) brew2.amount, Long::sum);
+                    }
                 }
             }
             producersDiag.add(pd.toString());
@@ -1372,6 +1376,22 @@ public class PowerMonitorCoverBehavior {
         producerRateMemory.keySet().retainAll(new java.util.HashSet<Object>(lastControllers));
         producerRecipeName.keySet().retainAll(producerRateMemory.keySet());
         lastProducersDiag = producersDiag;
+        // FOLD-IN (restored -- the prior fuel-section accounting): scoped
+        // ovens' internal brew joins the counted liters and EU BEFORE any
+        // reader (row, chart capture, runway) sees the map. When hatches
+        // serve freely this is ~seconds of brew; when tanks back up it is
+        // the entire accumulating truth (field: 8x64k of capacity filling
+        // while the counter sat frozen).
+        for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : ovenInternals.entrySet()) {
+            Long preLiters = scan.litersByFluid.get(e.getKey());
+            Long preEU = scan.euByFluid.get(e.getKey());
+            scan.litersByFluid.merge(e.getKey(), e.getValue(), Long::sum);
+            if (preLiters != null && preLiters > 0 && preEU != null) {
+                long addEU = (long) (e.getValue() * (preEU / (double) preLiters));
+                scan.euByFluid.merge(e.getKey(), addEU, Long::sum);
+                lastConnectedReserveEU += addEU;
+            }
+        }
         // Measured consumption per fluid: each burning generator's fuel-side
         // EU rate over its verified EU-per-liter.
         java.util.Map<String, Double> consumption = new java.util.HashMap<>();

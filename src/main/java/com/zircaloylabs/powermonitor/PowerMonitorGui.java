@@ -560,25 +560,6 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                     })));
         }
         column.child(winRow.marginTop(1));
-        int[] windows = { 60, 300, 900, 1800, 3600 };
-        String[] windowNames = { "1m", "5m", "15m", "30m", "1h" };
-        Flow tsRow = Flow.row().coverChildren().marginTop(1);
-        for (int i = 0; i < windows.length; i++) {
-            final int wsec = windows[i];
-            final String wname = windowNames[i];
-            tsRow.child(new ButtonWidget<>()
-                    .background(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
-                    .hoverBackground(com.cleanroommc.modularui.drawable.UITexture.EMPTY)
-                    .overlay(IKey.dynamic(
-                            () -> chart.getWindow() == wsec ? "\u00a7f[" + wname + "]" : "\u00a78 " + wname + " "))
-                    .size(24, 9)
-                    .syncHandler(new InteractionSyncHandler().setOnMousePressed(md -> {
-                        if (md.isClient()) {
-                            chart.setWindow(wsec);
-                        }
-                    })));
-        }
-        column.child(tsRow);
     }
 
     // --- layout helpers ---
