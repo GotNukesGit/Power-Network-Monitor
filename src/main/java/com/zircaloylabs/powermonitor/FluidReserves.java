@@ -65,6 +65,9 @@ public final class FluidReserves {
         public final Map<Fluid, Long> euByFluid = new LinkedHashMap<>();
         /** Diagnostic: every counted tank ("Name @ x,y,z : fluid amounts"). */
         public final java.util.List<String> tankLines = new java.util.ArrayList<>();
+        /** Foreign generators plumbed to this fluid network (excluded from tank counting, but they DRINK the pools). */
+        public final java.util.List<MTEBasicGenerator> foreignBurners = new java.util.ArrayList<>();
+
         /** Identity set of counted tank tiles -- producer scoping checks output hatches against this. */
         public final java.util.Set<TileEntity> visitedTanks = java.util.Collections
                 .newSetFromMap(new java.util.IdentityHashMap<>());
@@ -170,8 +173,13 @@ public final class FluidReserves {
             if (mte instanceof gregtech.api.metatileentity.implementations.MTECable) {
                 return; // power cables are IFluidHandlers by inheritance only -- not tanks
             }
-            if (mte instanceof MTEBasicGenerator
-                    || mte instanceof gregtech.api.metatileentity.implementations.MTEBasicMachine
+            if (mte instanceof MTEBasicGenerator) {
+                if (result.foreignBurners.size() < 16) {
+                    result.foreignBurners.add((MTEBasicGenerator) mte); // its tank is its own; its THIRST is the pool's
+                }
+                return;
+            }
+            if (mte instanceof gregtech.api.metatileentity.implementations.MTEBasicMachine
                     || mte instanceof gregtech.api.metatileentity.implementations.MTEMultiBlockBase) {
                 return;
             }

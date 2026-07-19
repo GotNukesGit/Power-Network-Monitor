@@ -44,6 +44,15 @@ public class PowerMonitorCoverBehavior {
     private double emaBatterySlope = 0.0; // EU/t
     private long liveRelayTollEUt = 0L;
     private boolean lastGenPinned = false; // shared with the outage tracker's headroom scaling
+    private volatile boolean debugMode = false;
+
+    public boolean isDebugMode() {
+        return debugMode;
+    }
+
+    public void toggleDebugMode() {
+        debugMode = !debugMode;
+    }
 
     // ---- Victim-based brownout (operator-designed semantics) ----
     // BROWNOUT means machines ACTUALLY stopping for lack of power (starved
@@ -766,12 +775,17 @@ public class PowerMonitorCoverBehavior {
             net.minecraftforge.fluids.FluidStack probe = new net.minecraftforge.fluids.FluidStack(e.getKey(), 1000);
             long ratedSum = 0, currentSum = 0;
             boolean[] burns = new boolean[genN];
+            // TANK-CONTENT gating, not capability: GT registers creosote as
+            // a (poor) diesel fuel via the material fuel system, so a
+            // capability probe marks diesel engines as creosote burners and
+            // hands them phantom shares (field-convicted: all four gens
+            // receiving identical quarter-splits). A generator joins a
+            // fluid's split only if that fluid is what's IN ITS TANK --
+            // matching what the cycles pools already key on.
+            String fluidName = probe.getLocalizedName();
             for (int i = 0; i < genN; i++) {
                 NetworkDiscovery.Snapshot.GeneratorProfile p = snap.generatorFuelProfile.get(i);
-                Object mte = ((gregtech.api.interfaces.tileentity.IGregTechTileEntity) p.source).getMetaTileEntity();
-                if (mte instanceof gregtech.api.metatileentity.implementations.MTEBasicGenerator
-                        && ((gregtech.api.metatileentity.implementations.MTEBasicGenerator) mte).getFuelValue(probe,
-                                true) > 0) {
+                if (p.fuelName != null && p.fuelName.equals(fluidName)) {
                     burns[i] = true;
                     ratedSum += p.ratedEUt;
                     currentSum += Math.max(0L, p.rawOutEUt);
@@ -1232,6 +1246,24 @@ public class PowerMonitorCoverBehavior {
         // Measured consumption per fluid: each burning generator's fuel-side
         // EU rate over its verified EU-per-liter.
         java.util.Map<String, Double> consumption = new java.util.HashMap<>();
+        // Foreign plumbed burners: generators on OTHER power networks
+        // drinking the same tanks. Their burn joins the pool's drain so the
+        // shared row's net is the tank farm's PHYSICAL truth -- identical on
+        // every cover watching it (field-observed divergence: the EBF cover
+        // showed pure production while the MV/LV network drank the pool).
+        for (gregtech.api.metatileentity.implementations.MTEBasicGenerator fg : scan.foreignBurners) {
+            net.minecraftforge.fluids.FluidStack ft = fg.mFluid;
+            if (ft == null || ft.amount <= 0 || fg.getBaseMetaTileEntity() == null) {
+                continue;
+            }
+            long out = ((gregtech.api.interfaces.tileentity.IBasicEnergyContainer) fg.getBaseMetaTileEntity())
+                    .getAverageElectricOutput();
+            long euPerOp = fg.getFuelValue(ft, true);
+            long mbPerOp = Math.max(1, fg.consumedFluidPerOperation(ft));
+            if (out > 0 && euPerOp > 0) {
+                consumption.merge(displayFluidName(ft.getLocalizedName()), out * 20.0 * mbPerOp / euPerOp, Double::sum);
+            }
+        }
         for (NetworkDiscovery.Snapshot.GeneratorProfile p : lastGeneratorProfiles) {
             if (p.fuelName == null || p.fuelName.isEmpty() || p.rawOutEUt <= 0) {
                 continue;
@@ -1367,7 +1399,7 @@ public class PowerMonitorCoverBehavior {
     }
 
     private static String formatReserveLine(String name, long totalL, double slope, boolean windowed) {
-        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(" \u00a78(shared \u00b7 this network)\u00a77: \u00a7f")
+        StringBuilder sb = new StringBuilder("\u00a77").append(name).append(" \u00a78(shared)\u00a77: \u00a7f")
                 .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(totalL))
                 .append(" L");
         double floor = Math.max(1.0, totalL / 50000.0);

@@ -433,12 +433,23 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
                         .setEnabledIf(w -> !outage0.getStringValue().isEmpty())
                         .marginRight(4))
                 .child(new ButtonWidget<>()
-                        .overlay(IKey.str("\u00a7fdiag"))
+                        .overlay(IKey.str("\u00a78dbg"))
+                        .size(24, 11)
+                        .tooltipStatic(t -> t.addLine("\u00a77Toggle debug mode")
+                                .addLine("\u00a78(shows diag + per-row \u00a7f?\u00a78 provenance buttons)"))
+                        .syncHandler(new InteractionSyncHandler().setOnMousePressed(mouseData -> {
+                            if (!mouseData.isClient()) {
+                                b.toggleDebugMode();
+                            }
+                        })))
+                .child(new ButtonWidget<>()
+                        .overlay(IKey.dynamic(() -> b.isDebugMode() ? "\u00a7fdiag" : ""))
                         .size(30, 11)
+                        .marginLeft(3)
                         .tooltipStatic(t -> t.addLine("\u00a77Print network diagnostics to chat")
                                 .addLine("\u00a78(every member + demand source, with coordinates)"))
                         .syncHandler(new InteractionSyncHandler().setOnMousePressed(mouseData -> {
-                            if (!mouseData.isClient() && guiPlayer != null) {
+                            if (!mouseData.isClient() && guiPlayer != null && b.isDebugMode()) {
                                 for (String line : b.buildDiagnostics()) {
                                     guiPlayer.addChatMessage(new net.minecraft.util.ChatComponentText(line));
                                 }
@@ -488,12 +499,12 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         column.child(Flow.row().coverChildren().marginBottom(2)
                 .child(IKey.dynamic(text::get).asWidget())
                 .child(new ButtonWidget<>()
-                        .overlay(IKey.str("\u00a78?"))
+                        .overlay(IKey.dynamic(() -> b.isDebugMode() ? "\u00a78?" : ""))
                         .size(7, 9)
                         .marginLeft(3)
-                        .tooltipStatic(t -> t.addLine("\u00a77Show this row's math in chat"))
+                        .tooltipStatic(t -> t.addLine("\u00a77Show this row's math in chat \u00a78(debug mode)"))
                         .syncHandler(new InteractionSyncHandler().setOnMousePressed(mouseData -> {
-                            if (!mouseData.isClient() && player != null) {
+                            if (!mouseData.isClient() && player != null && b.isDebugMode()) {
                                 for (String line : b.buildProvenance(provKey)) {
                                     player.addChatMessage(new net.minecraft.util.ChatComponentText(line));
                                 }
