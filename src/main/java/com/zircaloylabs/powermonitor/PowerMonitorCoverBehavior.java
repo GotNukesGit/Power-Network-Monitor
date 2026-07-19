@@ -1447,6 +1447,16 @@ public class PowerMonitorCoverBehavior {
         return bestRuntime < 0 ? null : new Object[] { bestRuntime, bestFuel };
     }
 
+    /** Batteries alone -- the quantity the Batteries chart plots. */
+    public long getBatteryOnlyEU() {
+        return Math.max(0L, liveBufferedEU - liveInternalEU);
+    }
+
+    /** In-machine + connected reserves -- the quantity the Fuel chart plots. */
+    public long getRunnableFuelEU() {
+        return liveFuelReserveEU + lastConnectedReserveEU;
+    }
+
     public String getCyclesLine() {
         return cyclesLine;
     }
