@@ -40,6 +40,9 @@ public class MultiChartWidget extends Widget<MultiChartWidget> implements Intera
     }
 
     private final List<Series> series = new ArrayList<>();
+    /** Tracking band per series: {bottom, top}. 20% span centered on the live value;
+     *  recenters when the value drifts within 5% of an edge. Client render state. */
+    private final java.util.Map<Integer, double[]> bands = new java.util.HashMap<>();
     /** Visible window in points (1 point = 1s for fuel series). Client display state. */
     /** -1 = none; set by trace proximity or legend hover (client-side only). */
     private int hovered = -1;
@@ -111,16 +114,28 @@ public class MultiChartWidget extends Widget<MultiChartWidget> implements Intera
                     mxv = Math.max(mxv, v);
                 }
             }
-            if (mxv - mn < 1e-9) {
-                mxv = mn + 1; // flat series draws mid-height
+            // TRACKING BAND (operator-specified): the live value sits at
+            // band center; band span = 20% of its magnitude (floored). When
+            // the value drifts within 5% of an edge, the band recenters.
+            // History outside the band clamps to the frame.
+            double live0 = d.get(d.size() - 1) == null ? 0 : d.get(d.size() - 1);
+            double span = Math.max(0.20 * Math.max(Math.abs(live0), 1), 1);
+            double[] band = bands.get(i);
+            if (band == null || live0 < band[0] + 0.05 * (band[1] - band[0])
+                    || live0 > band[1] - 0.05 * (band[1] - band[0])) {
+                band = new double[] { live0 - span / 2, live0 + span / 2 };
+                bands.put(i, band);
             }
+            mn = band[0];
+            mxv = band[1];
             mins[i] = mn;
             maxs[i] = mxv;
             double[] pts = new double[d.size()];
-            double vm = Math.max(4, h * 0.12); // breathing room: no trace rides the frame edge
+            double vm = 3;
             for (int j = 0; j < d.size(); j++) {
                 double v = d.get(j) == null ? mn : d.get(j);
-                pts[j] = (h - vm) - ((v - mn) / (mxv - mn)) * (h - 2 * vm);
+                double frac = Math.max(0, Math.min(1, (v - mn) / (mxv - mn)));
+                pts[j] = (h - vm) - frac * (h - 2 * vm);
             }
             norm[i] = pts;
             if (inPlot && legendHover < 0) {
