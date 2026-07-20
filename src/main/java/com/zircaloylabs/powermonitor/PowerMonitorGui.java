@@ -17,7 +17,6 @@ import com.cleanroommc.modularui.widgets.layout.Flow;
 import gregtech.api.modularui2.CoverGuiData;
 import gregtech.api.modularui2.GTWidgetThemes;
 import gregtech.common.gui.modularui.cover.base.CoverBaseGui;
-import gregtech.common.gui.modularui.widget.LineChartWidget;
 import gregtech.api.util.GTUtility;
 
 import com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil;
@@ -110,7 +109,6 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue storageCap = reg(syncManager, "pm_storagecap", b::getStorageDischargeCapEUt);
         LongSyncValue storageIn = reg(syncManager, "pm_storagein", b::getBufferInEUt);
         LongSyncValue storageOut = reg(syncManager, "pm_storageout", b::getBufferOutEUt);
-        LongSyncValue buf = reg(syncManager, "pm_buf", b::getBatteryOnlyEU); // gutter matches the batteries-only series
         LongSyncValue bufCap = reg(syncManager, "pm_bufcap", b::getLiveBufferCapacityEU);
         LongSyncValue bat = reg(syncManager, "pm_bat", b::getBatteryEU);
         LongSyncValue batCap = reg(syncManager, "pm_batcap", b::getBatteryCapacityEU);
@@ -121,8 +119,7 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         LongSyncValue supplyLines = reg(syncManager, "pm_supplylines", () -> (long) b.getSupplyLines());
         LongSyncValue secEmpty = reg(syncManager, "pm_secempty", b::getSecondsToEmpty);
         LongSyncValue secFull = reg(syncManager, "pm_secfull", b::getSecondsToFull);
-        LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getLimitingPoolEU); // gutter matches the limiting-pool series
-        StringSyncValue fuelTitle = regStr(syncManager, "pm_fueltitle", b::getFuelChartTitle);
+        LongSyncValue fuel = reg(syncManager, "pm_fuel", b::getRunnableFuelEU); // fuel-presence guard for the ladder rows
         final net.minecraft.entity.player.EntityPlayer guiPlayer = data.getPlayer();
         dbgSync = new com.cleanroommc.modularui.value.sync.BooleanSyncValue(b::isDebugMode, v -> {});
         syncManager.syncValue("pm_dbg", dbgSync);
@@ -147,12 +144,6 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
         StringSyncValue schedFull = regStr(syncManager, "pm_schedfull", b::getFuelScheduleFullBurn);
         StringSyncValue schedCur = regStr(syncManager, "pm_schedcur", b::getFuelScheduleCurrent);
         StringSyncValue deadBuffer = regStr(syncManager, "pm_deadbuf", b::getDeadBufferWarning);
-        StringSyncValue res0 = regStr(syncManager, "pm_res0", () -> b.getFuelRow(0));
-        StringSyncValue res1 = regStr(syncManager, "pm_res1", () -> b.getFuelRow(1));
-        StringSyncValue res2 = regStr(syncManager, "pm_res2", () -> b.getFuelRow(2));
-        StringSyncValue res3 = regStr(syncManager, "pm_res3", () -> b.getFuelRow(3));
-        StringSyncValue res4 = regStr(syncManager, "pm_res4", () -> b.getFuelRow(4));
-        StringSyncValue res5 = regStr(syncManager, "pm_res5", () -> b.getFuelRow(5));
         StringSyncValue cycles = regStr(syncManager, "pm_cycles", b::getCyclesLine);
         StringSyncValue outage0 = regStr(syncManager, "pm_outage0", () -> b.getOutageSummary(0));
         StringSyncValue outage1 = regStr(syncManager, "pm_outage1", () -> b.getOutageSummary(1));
@@ -650,90 +641,6 @@ public class PowerMonitorGui extends CoverBaseGui<PowerMonitorCover> {
     private void divider(Flow column) {
         column.child(new Rectangle().color(DIVIDER_COLOR).asWidget().size(CONTENT_WIDTH, 1)
                 .marginTop(1).marginBottom(3));
-    }
-
-    /**
-     * One chart cell: title (states the unit ONCE), plot with our own axis
-     * labels, and a live value to the right.
-     *
-     * The widget's built-in min/max text is disabled (renderMinMaxText
-     * false) because it string-concatenates the raw double with the unit --
-     * its formatter field is never applied to that text (verified in GT
-     * source, line 239: renderer.draw(maxValue + chartUnit)), which is where
-     * "5.30739E7 EU" came from. We overlay our own: axis bounds in dim gray
-     * (clearly secondary, can't be mistaken for a live reading), unit-free
-     * since the title already said it; the LIVE value sits to the right of
-     * the plot in bright white.
-     */
-    private Flow chartCell(String title, Supplier<List<Double>> series, LongSyncValue realtime) {
-        return chartCell(title, series, realtime, true);
-    }
-
-    /**
-     * zeroAnchored=true: flow charts (Demand/Generation) -- their language is
-     * steps-from-zero and headroom. zeroAnchored=false: stock charts
-     * (Batteries/Fuel) -- WINDOWED min..max of visible history so a 1% drift
-     * on a huge axis fills the frame and the slope becomes readable; both
-     * axis labels show true values, so the window's narrowness self-declares.
-     */
-    private Flow chartCell(String title, Supplier<List<Double>> series, LongSyncValue realtime, boolean zeroAnchored) {
-        return chartCell(IKey.str("\u00a7f" + title), series, realtime, zeroAnchored);
-    }
-
-    private Flow chartCell(IKey titleKey, Supplier<List<Double>> series, LongSyncValue realtime, boolean zeroAnchored) {
-        GenericListSyncHandler<Double> handler = new GenericListSyncHandler<>(
-                series, null, PacketBuffer::readDouble, PacketBuffer::writeDouble, Double::equals, null);
-        LineChartWidget chart = new LineChartWidget()
-                .syncHandler(handler)
-                .widgetTheme(GTWidgetThemes.TESLA_TOWER_CHART)
-                .background(new Rectangle().color(CHART_BG)) // explicit bg wins over the theme's purple
-                .lineWidth(2)
-                .renderMinMaxText(false)
-                .size(CHART_WIDTH, CHART_HEIGHT);
-        if (zeroAnchored) {
-            chart.lowerBoundAlwaysZero();
-        }
-        ParentWidget<?> plot = new ParentWidget<>()
-                .size(CHART_WIDTH, CHART_HEIGHT)
-                .child(chart)
-                .child(IKey.dynamic(() -> "\u00a78" + fmt(seriesMax(handler))).asWidget().top(1).left(2))
-                .child(zeroAnchored ? IKey.str("\u00a780").asWidget().bottom(1).left(2)
-                        : IKey.dynamic(() -> "\u00a78" + fmt(seriesMin(handler))).asWidget().bottom(1).left(2));
-        return Flow.column().coverChildren()
-                .child(titleKey.asWidget().marginBottom(1))
-                .child(Flow.row().coverChildren()
-                        .child(plot)
-                        .child(IKey.dynamic(() -> "\u00a7f" + fmt(realtime.getLongValue())).asWidget()
-                                .marginLeft(4).verticalCenter()));
-    }
-
-    private static long seriesMin(GenericListSyncHandler<Double> handler) {
-        List<Double> list = handler.getValue();
-        if (list == null || list.isEmpty()) {
-            return 0L;
-        }
-        double min = Double.MAX_VALUE;
-        for (Double d : list) {
-            if (d != null && d < min) {
-                min = d;
-            }
-        }
-        return min == Double.MAX_VALUE ? 0L : Math.round(min);
-    }
-
-    /** Max of the synced series (the chart's effective upper axis bound with lowerBoundAlwaysZero). */
-    private static long seriesMax(GenericListSyncHandler<Double> handler) {
-        List<Double> list = handler.getValue();
-        if (list == null || list.isEmpty()) {
-            return 0L;
-        }
-        double max = 0;
-        for (Double d : list) {
-            if (d != null && d > max) {
-                max = d;
-            }
-        }
-        return Math.round(max);
     }
 
     private LongSyncValue reg(PanelSyncManager syncManager, String name, java.util.function.LongSupplier getter) {
