@@ -8,7 +8,6 @@ import net.minecraft.client.renderer.Tessellator;
 
 import org.lwjgl.opengl.GL11;
 
-import com.cleanroommc.modularui.api.widget.Interactable;
 import com.cleanroommc.modularui.screen.viewport.ModularGuiContext;
 import com.cleanroommc.modularui.theme.WidgetThemeEntry;
 import com.cleanroommc.modularui.value.sync.GenericListSyncHandler;
@@ -21,7 +20,7 @@ import com.cleanroommc.modularui.widget.Widget;
  * -- snaps the axis labels to THAT series' true min/max/live values in its own
  * unit. No shared axis exists because no honest one can.
  */
-public class MultiChartWidget extends Widget<MultiChartWidget> implements Interactable {
+public class MultiChartWidget extends Widget<MultiChartWidget> {
 
     public static final class Series {
 

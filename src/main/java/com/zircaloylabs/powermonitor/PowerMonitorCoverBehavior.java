@@ -111,8 +111,6 @@ public class PowerMonitorCoverBehavior {
     private volatile int chartWindowSeconds = 300;
     /** Per-fluid burnout: shortest ACTIVE burner runway (internal+share over production-aware drain). */
     private volatile java.util.Map<String, Long> fluidBurnoutSec = java.util.Collections.emptyMap();
-    private volatile String lastLimitingFuel = "";
-    private volatile long lastLimitingPoolEU = -1L;
     private volatile long lastCyclesDemand = 0L;
     private volatile long lastCyclesSeconds = 0L;
     private volatile String[] genFuelRows = new String[0]; // per-generator internal reserves, 1 Hz
@@ -137,11 +135,6 @@ public class PowerMonitorCoverBehavior {
     // MUI2's sync handlers poll their supplier every container tick, so the
     // supplier must be a cheap cached read, same pattern as GT's Tesla Tower
     // chart). Swapped wholesale so GUI reads never see a half-built list.
-    private volatile java.util.List<Double> chartConsumption = java.util.Collections.emptyList();
-    private volatile java.util.List<Double> chartGeneration = java.util.Collections.emptyList();
-    private volatile java.util.List<Double> chartDemand = java.util.Collections.emptyList();
-    private volatile java.util.List<Double> chartBuffered = java.util.Collections.emptyList();
-    private volatile java.util.List<Double> chartFuel = java.util.Collections.emptyList();
 
     private long liveDemandEUt = 0L;
     private long liveUnmetEUt = 0L;
@@ -165,15 +158,12 @@ public class PowerMonitorCoverBehavior {
     private long shownFuelReserveEU = 0L;
 
     /** Per-generator output EMA, weak-keyed on the machine so removed generators don't linger. */
-    private final java.util.WeakHashMap<gregtech.api.interfaces.tileentity.IBasicEnergyContainer, Long> genOutEma = new java.util.WeakHashMap<>();
-    private final java.util.WeakHashMap<gregtech.api.interfaces.tileentity.IBasicEnergyContainer, Long> genOutShown = new java.util.WeakHashMap<>();
     private String emaTopName = "";
 
     private long shownConsumptionEUt = 0L;
     private long shownGenerationEUt = 0L;
     private long shownTopDrawEUt = 0L;
     private long shownLineLossEUt = 0L;
-    private long emaLineLoss = -1L;
 
     /** Per-name EMA of draw, for a stable top-consumers list. Pruned each sample. */
     private final java.util.HashMap<String, Long> drawEmaByName = new java.util.HashMap<>();
@@ -567,27 +557,6 @@ public class PowerMonitorCoverBehavior {
                     }
                 }
                 cl = "\u00a77" + st.name + ": \u00a7ffuel for ~" + cycles + " cycles" + clock + limitNote;
-                // The chart follows the killer: record the limiting fuel's
-                // whole pool (internals of its generators + shared reserves)
-                // so the plummeting line IS the fuel that ends the recipe.
-                if (pool != null) {
-                    String lf = (String) pool[1];
-                    long lpEU = 0;
-                    for (NetworkDiscovery.Snapshot.GeneratorProfile p : snap.generatorFuelProfile) {
-                        if (p.fuelName != null && displayFluidName(p.fuelName).equals(lf)) {
-                            lpEU += p.fuelEU;
-                        }
-                    }
-                    for (java.util.Map.Entry<net.minecraftforge.fluids.Fluid, Long> e : lastSharedEUByFluid
-                            .entrySet()) {
-                        if (displayFluidName(new net.minecraftforge.fluids.FluidStack(e.getKey(), 1)
-                                .getLocalizedName()).equals(lf)) {
-                            lpEU += e.getValue();
-                        }
-                    }
-                    lastLimitingFuel = lf;
-                    lastLimitingPoolEU = lpEU;
-                }
                 break;
             }
         }
@@ -787,7 +756,6 @@ public class PowerMonitorCoverBehavior {
             sumA += f[2];
         }
         long lossRaw = Math.max(0L, (sumG - sumD - sumA) / Math.max(1, lossWindow.size()));
-        emaLineLoss = lossRaw;
         shownLineLossEUt = lossRaw;
 
         alertNearbyPlayers(hostTile, worldTime);
@@ -1014,10 +982,8 @@ public class PowerMonitorCoverBehavior {
                 dq.remove(0);
             }
         }
-        fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true, -1L);
-        // MODEL v2: no override needed -- the per-gen readings sum to the
-        // POWER figure by construction (one accumulation, one frame).
-        fuelScheduleCurrent = buildFuelSchedule(smoothedProfile, false, -1L);
+        fuelScheduleFullBurn = buildFuelSchedule(smoothedProfile, true);
+        fuelScheduleCurrent = buildFuelSchedule(smoothedProfile, false);
         // Per-generator internal reserves: EACH generator, its own fuel, its
         // own runway at rated burn (operator-specified layout -- the unified
         // ladder is the network view, these are the machines).
@@ -1040,19 +1006,8 @@ public class PowerMonitorCoverBehavior {
         if (history != null) {
             history.record(rawConsumption, rawGeneration, liveDemandEUt,
                     Math.max(0L, liveBufferedEU - liveInternalEU), // BATTERIES only: the structural quantity
-                    getLimitingPoolEU(), // the LIMITING fuel's pool -- the line that kills you
+                    getRunnableFuelEU(), // runnable reserve (peaks bookkeeping; chart reads deep buffers)
                     worldTime);
-            java.util.List<Double> cons = new java.util.ArrayList<>(CHART_MAX_POINTS);
-            java.util.List<Double> gen = new java.util.ArrayList<>(CHART_MAX_POINTS);
-            java.util.List<Double> dem = new java.util.ArrayList<>(CHART_MAX_POINTS);
-            java.util.List<Double> buf = new java.util.ArrayList<>(CHART_MAX_POINTS);
-            java.util.List<Double> fu = new java.util.ArrayList<>(CHART_MAX_POINTS);
-            history.downsampleInto(cons, gen, dem, buf, fu, CHART_MAX_POINTS);
-            chartConsumption = cons;
-            chartGeneration = gen;
-            chartDemand = dem;
-            chartBuffered = buf;
-            chartFuel = fu;
         }
     }
 
@@ -1595,16 +1550,6 @@ public class PowerMonitorCoverBehavior {
         return sb.toString();
     }
 
-    /** Combined fuel rows: per-generator internals first, then shared pools. */
-    public String getFuelRow(int index) {
-        String[] g = genFuelRows;
-        String[] sh = sharedFuelRows;
-        if (index < g.length) {
-            return g[index];
-        }
-        return index - g.length < sh.length ? sh[index - g.length] : "";
-    }
-
     /**
      * Fuel-pool limit (operator-designed): per fuel, pool = internal-tank EU
      * of generators on it + shared-reserve EU it feeds; drain = combined
@@ -1713,15 +1658,6 @@ public class PowerMonitorCoverBehavior {
         return liveFuelReserveEU + lastConnectedReserveEU;
     }
 
-    /** The fuel chart's quantity: the LIMITING fuel's pool, sticky; runnable total before any verdict. */
-    public long getLimitingPoolEU() {
-        return lastLimitingPoolEU >= 0 ? lastLimitingPoolEU : getRunnableFuelEU();
-    }
-
-    public String getFuelChartTitle() {
-        return lastLimitingFuel.isEmpty() ? "Fuel reserve (EU)" : "Fuel: " + lastLimitingFuel + " (EU)";
-    }
-
     /** Segment audit panel line: the hazard if one exists, else a clean tally. */
     public String getSegmentLine() {
         if (!frameSegmentHazard.isEmpty()) {
@@ -1778,23 +1714,9 @@ public class PowerMonitorCoverBehavior {
         return windowed(fuelPoolSlotHistory[slot]);
     }
 
-    public java.util.List<Double> getFuelPoolSeries(int slot) {
-        return new java.util.ArrayList<>(fuelPoolSlotHistory[slot]);
-    }
-
     public String getFuelPoolName(int slot) {
         String n = fuelPoolSlotNames[slot];
         return n == null ? "" : n;
-    }
-
-    /** Losses series derived per point: generation - delivered. */
-    public java.util.List<Double> getChartLosses() {
-        java.util.List<Double> g = getChartGeneration(), c = getChartConsumption();
-        java.util.List<Double> out = new java.util.ArrayList<>(Math.min(g.size(), c.size()));
-        for (int i = 0; i < Math.min(g.size(), c.size()); i++) {
-            out.add(Math.max(0, g.get(i) - c.get(i)));
-        }
-        return out;
     }
 
     /** Per-generator fuel rows for the collapsed FUEL hover-card. */
@@ -2005,7 +1927,7 @@ public class PowerMonitorCoverBehavior {
      *                 current measured output (generators idle or throttled
      *                 burn slower, so runtimes stretch accordingly).
      */
-    private static String buildFuelSchedule(java.util.List<long[]> profile, boolean fullBurn, long headerRateOverride) {
+    private static String buildFuelSchedule(java.util.List<long[]> profile, boolean fullBurn) {
         java.util.List<double[]> items = new java.util.ArrayList<>(); // {rateEUt, secondsUntilDry}
         for (long[] p : profile) {
             long rate = fullBurn ? p[1] : p[0];
@@ -2260,11 +2182,6 @@ public class PowerMonitorCoverBehavior {
         return history != null ? history.getPeakDemand() : 0L;
     }
 
-    /** Downsampled demand series (EU/t, oldest-first) for chart display. Empty if no history. */
-    public java.util.List<Double> getChartDemand() {
-        return chartDemand;
-    }
-
     public int getGeneratorCount() {
         return generatorCount;
     }
@@ -2302,26 +2219,6 @@ public class PowerMonitorCoverBehavior {
     /** Stepped capacity schedule at current output, or "" if nothing fueled/running. */
     public String getFuelScheduleCurrent() {
         return fuelScheduleCurrent;
-    }
-
-    /** Downsampled buffered-EU series (oldest-first) for chart display. Empty if no history. */
-    public java.util.List<Double> getChartBuffered() {
-        return chartBuffered;
-    }
-
-    /** Downsampled fuel-reserve-EU series (oldest-first) for chart display. Empty if no history. */
-    public java.util.List<Double> getChartFuel() {
-        return chartFuel;
-    }
-
-    /** Downsampled consumption series (EU/t, oldest-first) for chart display. Empty if no history. */
-    public java.util.List<Double> getChartConsumption() {
-        return chartConsumption;
-    }
-
-    /** Downsampled generation series (EU/t, oldest-first) for chart display. Empty if no history. */
-    public java.util.List<Double> getChartGeneration() {
-        return chartGeneration;
     }
 
     /** Peak consumption over the history window (0 if no history). */
