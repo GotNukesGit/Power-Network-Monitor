@@ -109,6 +109,8 @@ public class PowerMonitorCoverBehavior {
     private final java.util.List<Double> deepBat = java.util.Collections
             .synchronizedList(new java.util.ArrayList<>());
     private volatile int chartWindowSeconds = 300;
+    /** Per-fluid burnout: shortest ACTIVE burner runway (internal+share over production-aware drain). */
+    private volatile java.util.Map<String, Long> fluidBurnoutSec = java.util.Collections.emptyMap();
     private volatile String lastLimitingFuel = "";
     private volatile long lastLimitingPoolEU = -1L;
     private volatile long lastCyclesDemand = 0L;
@@ -883,6 +885,7 @@ public class PowerMonitorCoverBehavior {
             }
         }
         java.util.List<String> ladderProv = new java.util.ArrayList<>();
+        java.util.Map<String, Long> burnout = new java.util.HashMap<>();
         // MODEL v2: one reading per generator per frame feeds EVERYTHING;
         // PRODUCTION-AWARE drains (a turbine fed by boilers doesn't die when
         // its share runs out at raw burn -- field-convicted 16m-vs-50m).
@@ -908,6 +911,13 @@ public class PowerMonitorCoverBehavior {
             long curDrain = shownOut - prodSlice;
             long fullRunway = fullDrain > 0 ? (p.fuelEU + sharedByGenRated[i]) / (fullDrain * 20L) : -1;
             long curRunway = curDrain > 0 ? (p.fuelEU + sharedByGenCurrent[i]) / (curDrain * 20L) : -1;
+            // Row-side burnout: an ACTIVELY BURNING generator's runway joins
+            // its fluid's minimum -- the shared row's ETA then answers "when
+            // does this fuel stop sustaining power" (internals included),
+            // matching cycles by construction (same arithmetic, one source).
+            if (shownOut > 0 && curRunway >= 0 && p.fuelName != null && !p.fuelName.isEmpty()) {
+                burnout.merge(displayFluidName(p.fuelName), curRunway, Math::min);
+            }
             ladderProv.add("\u00a77" + NetworkDiscovery.localNameOf(p.source) + ": rated \u00a7f" + p.ratedEUt
                     + "\u00a77 cur \u00a7f" + shownOut + "\u00a77 \u00b7 internal \u00a7f" + p.fuelEU
                     + "\u00a77 EU + share \u00a7f" + sharedByGenRated[i] + "\u00a77(full)/\u00a7f"
@@ -919,6 +929,7 @@ public class PowerMonitorCoverBehavior {
                     + "\u00a77(cur)");
         }
         lastLadderProv = ladderProv;
+        fluidBurnoutSec = burnout;
         emaFuelReserve = ema(emaFuelReserve, snap.totalFuelReserveEU);
         shownFuelReserveEU = applyDeadband(shownFuelReserveEU, emaFuelReserve);
         // Per-generator fuel rows: each generator, its OWN internal tank
@@ -1537,7 +1548,7 @@ public class PowerMonitorCoverBehavior {
                 windowed = false;
             }
             if (lines.size() < 2) {
-                lines.add(formatReserveLine(name, total, netRate, windowed));
+                lines.add(formatReserveLine(name, total, netRate, windowed, fluidBurnoutSec.get(name)));
                 sharedNamesOut.add(name);
             }
         }
@@ -1561,7 +1572,8 @@ public class PowerMonitorCoverBehavior {
         return gtName;
     }
 
-    private static String formatReserveLine(String name, long totalL, double slope, boolean windowed) {
+    private static String formatReserveLine(String name, long totalL, double slope, boolean windowed,
+            Long burnoutSec) {
         StringBuilder sb = new StringBuilder("\u00a77").append(name).append(" \u00a78(shared)\u00a77: \u00a7f")
                 .append(com.gtnewhorizon.gtnhlib.util.numberformatting.NumberFormatUtil.formatNumber(totalL))
                 .append(" L");
@@ -1570,9 +1582,15 @@ public class PowerMonitorCoverBehavior {
         if (slope > floor) {
             sb.append(" \u00a77\u00b7 \u00a7a+").append(Math.round(slope)).append(" L/s").append(win);
         } else if (slope < -floor) {
-            long eta = (long) (totalL / -slope);
-            sb.append(" \u00a77\u00b7 \u00a7c").append(Math.round(slope)).append(" L/s").append(win)
-                    .append(" \u00a77~").append(PowerMonitorCover.formatSeconds(eta));
+            sb.append(" \u00a77\u00b7 \u00a7c").append(Math.round(slope)).append(" L/s").append(win);
+            // BURNOUT ETA when burners are active: shortest burning
+            // generator's runway (internals + share, production-aware) --
+            // the same arithmetic cycles uses, so the two always agree.
+            // Pool-empty ETA only when nothing burns (foreign drain).
+            long eta = burnoutSec != null ? burnoutSec : (long) (totalL / -slope);
+            sb.append(" \u00a77~").append(PowerMonitorCover.formatSeconds(eta));
+        } else if (burnoutSec != null) {
+            sb.append(" \u00a77\u00b7 ~").append(PowerMonitorCover.formatSeconds(burnoutSec));
         }
         return sb.toString();
     }
