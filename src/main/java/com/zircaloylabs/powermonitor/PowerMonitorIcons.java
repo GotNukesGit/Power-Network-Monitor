@@ -53,8 +53,15 @@ import cpw.mods.fml.relauncher.SideOnly;
  * IMPORTANT: an instance of this class must be registered on
  * MinecraftForge.EVENT_BUS during client-side preInit -- call
  * registerSelf() once from PowerMonitorMod#preInit (client side only).
+ *
+ * SIDE RULE (dedicated-server crash, field-reported -- do not regress):
+ * this class MUST NOT carry a class-level @SideOnly. registerTier() calls
+ * getOverlayContainer() during preInit on BOTH sides; a stripped class
+ * dies with "invalid side SERVER" before the server finishes loading.
+ * Only the stitch handler below is client-only -- the containers
+ * themselves are side-neutral data holders, exactly like GT's own
+ * Textures.BlockIcons.
  */
-@SideOnly(Side.CLIENT)
 public final class PowerMonitorIcons {
 
     private static final MutableIconContainer[] CONTAINERS = buildContainers();
@@ -74,6 +81,7 @@ public final class PowerMonitorIcons {
         MinecraftForge.EVENT_BUS.register(new PowerMonitorIcons());
     }
 
+    @SideOnly(Side.CLIENT)
     @SubscribeEvent
     public void onTextureStitch(TextureStitchEvent.Pre event) {
         if (event.map.getTextureType() != 0) {
@@ -115,8 +123,9 @@ public final class PowerMonitorIcons {
         }
 
         @Override
+        @SideOnly(Side.CLIENT)
         public ResourceLocation getTextureFile() {
-            return TextureMap.locationBlocksTexture;
+            return TextureMap.locationBlocksTexture; // render-path only; stripped on servers
         }
     }
 }
